@@ -1,0 +1,13 @@
+aiogram==3.13.1
+SQLAlchemy[asyncio]==2.0.35
+alembic==1.13.3
+asyncpg==0.30.0
+pydantic==2.9.2
+pydantic-settings==2.5.2
+aiohttp==3.10.9
+websockets==13.1
+structlog==24.4.0
+orjson==3.10.7
+redis==5.1.1
+tenacity==9.0.0
+python-dateutil==2.9.0.post0

@@ -1,0 +1,84 @@
+"""Scanning Priority System (Scanner §1.6).
+
+Assigns each asset a priority tier (1: majors, 2: top-100, 3: long-tail) governing
+event-queue ordering. Priority 1 never batches/queues; 2/3 may micro-batch. Priority
+never affects the tier (⭐/🟢/🟡/⚪) a signal receives — input-scheduling only.
+"""
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+from src.config.scanner_config import ScannerConfig
+
+
+class PriorityClassifier:
+    def __init__(self, config: ScannerConfig) -> None:
+        self._config = config
+        self._top100: set[str] = set()
+
+    def update_config(self, config: ScannerConfig) -> None:
+        self._config = config
+
+    def set_top100(self, assets: set[str]) -> None:
+        self._top100 = {a.upper() for a in assets}
+
+    def priority(self, base_asset: str) -> int:
+        asset = base_asset.upper()
+        if asset in self._config.priority1_assets:
+            return 1
+        if asset in self._top100:
+            return 2
+        return 3
+
+
+class PriorityEventQueue:
+    """Priority queue feeding the Signal Generator (§1.6 queue prioritization).
+
+    Priority 1 events are always dequeued before 2, before 3. Under sustained load
+    Priority 3 may queue briefly; Priority 1 never does.
+    """
+
+    def __init__(self) -> None:
+        self._queues: dict[int, asyncio.Queue] = {
+            1: asyncio.Queue(), 2: asyncio.Queue(), 3: asyncio.Queue()
+        }
+        # Coalesce by (base,quote): a symbol already queued is not re-queued. Without
+        # this, high-frequency majors (BTC/ETH/SOL) flooded the priority-1 queue with
+        # tens of thousands of duplicate events, starving priorities 2/3 (every
+        # mid-cap) so they were never processed -> no candidates for profitable alts.
+        self._pending: set[tuple[str, str]] = set()
+        # Round-robin cursor so priority 1 cannot indefinitely precede 2/3.
+        self._starts = 0
+        self._event = asyncio.Event()
+
+    def put(self, priority: int, item: tuple[str, str, str]) -> None:
+        key = (item[0], item[1])
+        if key in self._pending:
+            return  # already queued — coalesce (latest cache state read at process time)
+        self._pending.add(key)
+        self._queues[priority].put_nowait(item)
+        self._event.set()
+
+    async def get(self) -> tuple[str, str, str]:
+        while True:
+            # Weighted-fair order: rotate the starting tier so 2/3 are not starved by
+            # a never-empty priority-1 queue, while still favouring 1 most cycles.
+            order = (1, 2, 3) if self._starts % 4 else (2, 3, 1)
+            self._starts += 1
+            for p in order:
+                q = self._queues[p]
+                if not q.empty():
+                    item = q.get_nowait()
+                    self._pending.discard((item[0], item[1]))
+                    return item
+            self._event.clear()
+            await self._event.wait()
+
+    def pending(self) -> int:
+        return sum(q.qsize() for q in self._queues.values())
+
+
+def profit_reference_for(priority: int) -> Decimal:
+    """Per-tier normalization reference for profit/liquidity scaling (§9.4/§11.2)."""
+    return {1: Decimal(500), 2: Decimal(200), 3: Decimal(50)}.get(priority, Decimal(100))

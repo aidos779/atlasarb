@@ -1,0 +1,17 @@
+# Scanner tuning overrides (Spec Part 3 §20). Hot-reloadable; values here override the
+# bundled ScannerConfig defaults. Every parameter is validated at load (§20.3). This file
+# is the "environment layer" — production ships the conservative baseline (empty overrides).
+#
+# Uncomment and adjust to tune without a code change:
+#
+# min_net_profit_usd = 5.0
+# min_roi_pct = 0.15
+# max_slippage_cex_pct = 1.0
+# max_slippage_dex_pct = 1.5
+# min_liquidity_cex_usd = 5000.0
+# min_liquidity_dex_usd = 10000.0
+# confidence_threshold = 70.0
+# reconciliation_interval_sec = 1.0
+# warmup_samples = 3
+# max_bridge_time_sec = 1200
+# fast_bridge_threshold_sec = 120
