@@ -38,6 +38,14 @@ log = get_logger("adapter.cex")
 # so a persistent 403/451 emits once a minute with a suppressed-count, not every retry.
 _http_log_throttle = LogThrottle(interval_sec=60.0)
 
+# Throttle for WS connect/close lifecycle logs: a flapping venue (e.g. a host that drops
+# every ~40s across every shard) would otherwise flood the logs with dozens of identical
+# ws_connected/ws_closed INFO lines a minute. The first event in a window logs fully;
+# repeats within the window are collapsed into a repeats_suppressed count. ws_closed is
+# keyed on close_code so a rare policy/auth close (1008/4004) is never hidden behind the
+# routine 1006 churn.
+_ws_log_throttle = LogThrottle(interval_sec=60.0)
+
 
 def redact_proxy(url: str) -> str:
     """Hide any password in a proxy URL before logging (scheme://user:***@host:port)."""
@@ -455,8 +463,10 @@ class BaseCexAdapter(ExchangeAdapter):
         loop = asyncio.get_event_loop()
         async with session.ws_connect(self._ws_url, autoping=True, heartbeat=None) as ws:
             self._shard_ws[idx] = ws
-            log.info("ws_connected", venue=self.id, shard=idx, url=self._ws_url,
-                     proxy=self._proxy_log)
+            emit, suppressed = _ws_log_throttle.allow((self.id, "ws_connected"))
+            if emit:
+                log.info("ws_connected", venue=self.id, shard=idx, url=self._ws_url,
+                         proxy=self._proxy_log, repeats_suppressed=suppressed)
             try:
                 symbols = [self._symbol_map.get(self._raw_symbol_from_pair(p))
                            for p in list(self._shards[idx])]
@@ -467,10 +477,14 @@ class BaseCexAdapter(ExchangeAdapter):
             finally:
                 # Close code/reason names WHY a socket dropped (1006 abnormal, 1008 policy,
                 # 4004 auth, ServerTimeout, etc.) — the exact info needed to tell a code
-                # bug from a server/network close.
-                log.info("ws_closed", venue=self.id, shard=idx,
-                         close_code=ws.close_code,
-                         exc=describe_exc(ws.exception()) if ws.exception() else None)
+                # bug from a server/network close. Keyed on close_code so a rare policy/auth
+                # close is always emitted, while repeated 1006 churn is collapsed.
+                emit, suppressed = _ws_log_throttle.allow((self.id, "ws_closed", ws.close_code))
+                if emit:
+                    log.info("ws_closed", venue=self.id, shard=idx,
+                             close_code=ws.close_code,
+                             exc=describe_exc(ws.exception()) if ws.exception() else None,
+                             repeats_suppressed=suppressed)
                 self._shard_ws[idx] = None
 
     def _heartbeat_frame(self) -> dict | str | None:

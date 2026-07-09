@@ -39,6 +39,23 @@ def test_log_throttle_keys_are_independent():
     assert not th.allow("a", now=2.0)[0]
 
 
+def test_ws_flap_is_collapsed_but_distinct_close_codes_pass():
+    """A flapping shard (many 1006 reconnects in one window) logs once with a
+    suppressed count, while a rare policy/auth close code is never hidden."""
+    th = LogThrottle(interval_sec=60.0)
+    # First 1006 close emits; the next dozen within the window are collapsed.
+    emit, _ = th.allow(("mexc", "ws_closed", 1006), now=0.0)
+    assert emit
+    for i in range(12):
+        assert not th.allow(("mexc", "ws_closed", 1006), now=1.0 + i)[0]
+    # A different close code in the same window is a distinct key → still emitted.
+    emit, _ = th.allow(("mexc", "ws_closed", 4004), now=5.0)
+    assert emit
+    # Repeated connects for the same venue collapse independently of closes.
+    assert th.allow(("mexc", "ws_connected"), now=0.0)[0]
+    assert not th.allow(("mexc", "ws_connected"), now=3.0)[0]
+
+
 # ── HTTP error handling (no JSON parse on non-200) ──
 
 class _FakeResp:
