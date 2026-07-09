@@ -9,7 +9,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 from src.domain.enums import ArbitrageType
-from src.domain.market import PriceQuote
 from src.domain.signal import Candidate, LegRef
 from src.scanner.detectors.base import DetectionContext, Detector
 
@@ -27,9 +26,8 @@ class CexCexDetector(Detector):
         best_ask = Decimal("Infinity")
         best_sell_venue: str | None = None
         best_bid = Decimal(0)
-        quotes: dict[str, PriceQuote] = {}
+        # Single O(n) pass over the venues' quotes — no per-venue dict allocation.
         for venue, quote in prices:  # type: ignore[assignment]
-            quotes[venue] = quote
             if quote.ask < best_ask:
                 best_ask, best_buy_venue = quote.ask, venue
             if quote.bid > best_bid:

@@ -101,11 +101,22 @@ class ScannerConfig:
     ws_backoff_base_sec: float = 1.0
     ws_backoff_multiplier: float = 2.0
     ws_backoff_cap_sec: float = 30.0
-    ws_backoff_jitter: float = 0.20
+    ws_backoff_jitter: float = 1.0             # full jitter → shards de-sync (no storm)
     ws_slow_retry_interval_sec: float = 60.0
     ws_heartbeat_timeout_sec: float = 20.0
     ws_ping_interval_sec: float = 15.0         # app-level keepalive ping cadence (§2.3)
     ws_idle_timeout_sec: float = 60.0          # no inbound frame this long -> reconnect
+    # Per-shard connect/reconnect stagger (§2.3): shards open `idx * stagger` apart and
+    # each reconnect adds up to `stagger` of extra random delay, so a common upstream
+    # drop does not turn into a synchronized reconnect storm across every shard.
+    ws_connect_stagger_sec: float = 0.5
+
+    # ── DEX RPC provider health (§2.4 failover) ──
+    # Consecutive failures before a provider is temporarily disabled; cooldown grows
+    # from base to cap as it keeps failing, then it is probed again (auto-recovery).
+    rpc_provider_fail_threshold: int = 3
+    rpc_provider_cooldown_sec: float = 30.0
+    rpc_provider_cooldown_max_sec: float = 300.0
 
     # ── Health / staleness (§2.2, §4.4, §16) ──
     stale_cex_ws_sec: float = 15.0

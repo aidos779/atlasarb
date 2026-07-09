@@ -127,10 +127,16 @@ class Settings(BaseSettings):
     price_pro_usd: float = 79.0
 
     # ── CEX endpoints ──
-    binance_rest_url: str = "https://api.binance.com"
-    binance_ws_url: str = "wss://stream.binance.com:9443/stream"
+    # api.binance.com / stream.binance.com return HTTP 451 from restricted locations.
+    # data-api / data-stream.binance.vision are Binance's dedicated public market-data
+    # domains and serve the identical spot REST + WS; all public Binance data uses them.
+    binance_rest_url: str = "https://data-api.binance.vision"
+    binance_ws_url: str = "wss://data-stream.binance.vision/stream"
     bybit_rest_url: str = "https://api.bybit.com"
     bybit_ws_url: str = "wss://stream.bybit.com/v5/public/spot"
+    # Optional per-adapter proxy for Bybit only (its CDN 403-blocks some server IPs on
+    # every host). Empty = direct. Accepts http://, https://, socks5:// (see BybitAdapter).
+    bybit_proxy: str = ""
     # www.okx.com is geo-blocked from several regions (TCP timeout); the app.okx.com
     # mirror serves the identical v5 public API and stays reachable.
     okx_rest_url: str = "https://app.okx.com"

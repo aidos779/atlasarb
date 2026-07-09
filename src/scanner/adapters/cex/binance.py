@@ -18,14 +18,13 @@ class BinanceAdapter(BaseCexAdapter):
     ws_max_conns = 3
 
     def __init__(self, settings, config, sink, **kw) -> None:
-        # data-api/data-stream.binance.vision is Binance's public market-data mirror; it
-        # is reachable from many regions/cloud IPs where api/stream.binance.com is blocked
-        # or returns no data (the "Online then API Offline after ~1 min" case). Used only
-        # as failover after the configured primary host fails.
+        # All public Binance market data (exchangeInfo, bookTicker, depth, ping/health,
+        # discovery, WS + every reconnect) goes through data-api/data-stream.binance.vision
+        # via settings.binance_rest_url / binance_ws_url — api.binance.com and
+        # stream.binance.com return HTTP 451 from restricted locations. No fallback to the
+        # blocked hosts.
         super().__init__(settings, config, sink, settings.binance_rest_url,
-                         settings.binance_ws_url, rate_per_sec=100, burst=200,
-                         rest_fallbacks=["https://data-api.binance.vision"],
-                         ws_fallbacks=["wss://data-stream.binance.vision/stream"], **kw)
+                         settings.binance_ws_url, rate_per_sec=100, burst=200, **kw)
 
     def _ping_path(self) -> str:
         return "/api/v3/ping"

@@ -73,6 +73,9 @@ class BaseCexAdapter(ExchangeAdapter):
         self._on_success = on_success or (lambda latency=0.0, stream=False: None)
         self._on_failure = on_failure or (lambda hard=False: None)
         self._taker_fee = Decimal("0.001")   # 0.10% MVP default (§8.3)
+        # Redacted proxy label for logs; None means direct. Only Bybit sets it (per-adapter
+        # proxy). Kept here so the shared ws_connected log can report it generically.
+        self._proxy_log: str | None = None
 
     # ── active REST/WS host (rotates across primary + mirror hosts on failure) ──
     @property
@@ -292,6 +295,13 @@ class BaseCexAdapter(ExchangeAdapter):
     async def _shard_loop(self, idx: int) -> None:
         attempt = 0
         offline = False  # True once this shard escalated to slow-retry
+        # Stagger the *initial* connect so N shards of one venue don't all open (and
+        # therefore later all drop and reconnect) in lockstep. Shard 0 starts
+        # immediately; each later shard waits idx*stagger. Reconnect spread is handled
+        # separately by the full-jitter backoff.
+        stagger = self._config.ws_connect_stagger_sec
+        if stagger > 0 and idx > 0:
+            await self._sleep(idx * stagger)
         while not self._stop.is_set():
             self._shard_connected[idx] = False
             try:
@@ -340,7 +350,8 @@ class BaseCexAdapter(ExchangeAdapter):
         loop = asyncio.get_event_loop()
         async with session.ws_connect(self._ws_url, autoping=True, heartbeat=None) as ws:
             self._shard_ws[idx] = ws
-            log.info("ws_connected", venue=self.id, shard=idx, url=self._ws_url)
+            log.info("ws_connected", venue=self.id, shard=idx, url=self._ws_url,
+                     proxy=self._proxy_log)
             try:
                 symbols = [self._symbol_map.get(self._raw_symbol_from_pair(p))
                            for p in list(self._shards[idx])]
@@ -370,12 +381,20 @@ class BaseCexAdapter(ExchangeAdapter):
 
     async def _send_heartbeat(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         frame = self._heartbeat_frame()
-        if frame is None:
+        # Never write to an already-closing transport: doing so raised
+        # ClientConnectionResetError, the write-side error paired with the close_code
+        # 1006 churn in the logs. If the socket is closing, skip the ping and let the
+        # receive loop's CLOSED/idle detection drive a clean reconnect.
+        if frame is None or getattr(ws, "closed", False):
             return
-        if isinstance(frame, str):
-            await ws.send_str(frame)
-        else:
-            await ws.send_json(frame)
+        try:
+            if isinstance(frame, str):
+                await ws.send_str(frame)
+            else:
+                await ws.send_json(frame)
+        except (ConnectionResetError, aiohttp.ClientError, RuntimeError) as exc:
+            raise ConnectionError(
+                f"{self.id} ws heartbeat write failed: {describe_exc(exc)}") from exc
 
     async def _ws_receive_loop(self, ws: aiohttp.ClientWebSocketResponse, loop,
                                idx: int = 0) -> None:

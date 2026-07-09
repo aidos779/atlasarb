@@ -2,11 +2,30 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
+from src.config import get_logger
 from src.domain.market import BookLevel, CanonicalSymbol, FundingRate, OrderBook, PriceQuote
 from src.scanner.adapters.base_cex import BaseCexAdapter
+from src.scanner.adapters.tls import ssl_context
+
+log = get_logger("adapter.cex")
+
+
+def _redact_proxy(url: str) -> str:
+    """Hide any password in a proxy URL before logging (scheme://user:***@host:port)."""
+    try:
+        parts = urlsplit(url)
+        if parts.password:
+            netloc = f"{parts.username}:***@{parts.hostname}"
+            if parts.port:
+                netloc += f":{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except Exception:  # noqa: BLE001
+        return "***"
+    return url
 
 
 class BybitAdapter(BaseCexAdapter):
@@ -16,14 +35,31 @@ class BybitAdapter(BaseCexAdapter):
     ws_max_conns = 3
 
     def __init__(self, settings, config, sink, **kw) -> None:
-        # api/stream.bytick.com is Bybit's identical alternate host; it stays reachable
-        # from regions where api.bybit.com is geo-blocked (there it returns an HTML block
-        # page → the JSONDecodeError seen during discovery). Failover only.
         super().__init__(settings, config, sink, settings.bybit_rest_url,
-                         settings.bybit_ws_url, rate_per_sec=20, burst=40,
-                         rest_fallbacks=["https://api.bytick.com"],
-                         ws_fallbacks=["wss://stream.bytick.com/v5/public/spot"], **kw)
+                         settings.bybit_ws_url, rate_per_sec=20, burst=40, **kw)
         self._last_book: dict[str, tuple[list, list]] = {}
+        # Per-adapter proxy (Bybit only). Some server IPs are CloudFront-403'd by Bybit on
+        # EVERY host (api.bybit.com / api.bytick.com / api.bybit.kz), so no endpoint swap
+        # helps — the request must egress through a proxy. Empty = direct.
+        self._proxy = (settings.bybit_proxy or "").strip()
+        self._proxy_log = _redact_proxy(self._proxy) if self._proxy else None
+
+    async def connect(self) -> None:
+        # Direct connection uses the shared base transport unchanged. Only when BYBIT_PROXY
+        # is set do we build a proxy-aware session — scoped to THIS adapter, so every other
+        # exchange (and the DEX layer) keeps its direct session.
+        if not self._proxy:
+            await super().connect()
+            return
+        from aiohttp_socks import ProxyConnector  # lazy: only needed when a proxy is set
+        self._stop.clear()
+        timeout = aiohttp.ClientTimeout(total=self._config.cex_rest_timeout_sec)
+        # ProxyConnector.from_url handles http://, https://, socks4:// and socks5://; both
+        # REST (session.get) and WS (session.ws_connect) then egress through the proxy
+        # because they share this connector. certifi TLS is preserved end-to-end.
+        connector = ProxyConnector.from_url(self._proxy, ssl=ssl_context())
+        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        log.info("bybit_proxy_enabled", venue=self.id, proxy=self._proxy_log)
 
     def _ping_path(self) -> str:
         return "/v5/market/time"

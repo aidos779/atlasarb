@@ -19,9 +19,18 @@ from src.domain.enums import ExchangeStatus, VenueType
 from src.domain.market import CanonicalSymbol, FundingRate, OrderBook
 from src.domain.ports import ExchangeAdapter, MarketDataSink
 from src.scanner.adapters.rate_limiter import TokenBucket
+from src.scanner.adapters.rpc_pool import RpcErrorKind, RpcProviderPool
 from src.scanner.adapters.tls import ssl_context
 
 log = get_logger("adapter.dex")
+
+
+class _RpcFailure(Exception):
+    """Internal marker carrying the classified failure kind for the provider pool."""
+
+    def __init__(self, kind: RpcErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class BaseDexAdapter(ExchangeAdapter):
@@ -37,7 +46,14 @@ class BaseDexAdapter(ExchangeAdapter):
         self._sink = sink
         self.network = network
         self._rpc_urls = settings.rpc_urls_for(network)
-        self._rpc_idx = 0
+        # Health-scored provider rotation (§2.4): a 403/429/timeout endpoint is
+        # temporarily dropped instead of being retried at the same slot every cycle.
+        self._rpc_pool = RpcProviderPool(
+            urls=list(self._rpc_urls), network=network,
+            fail_threshold=config.rpc_provider_fail_threshold,
+            cooldown_base_sec=config.rpc_provider_cooldown_sec,
+            cooldown_max_sec=config.rpc_provider_cooldown_max_sec,
+        )
         self._limiter = TokenBucket(rate_per_sec, burst)
         self._session: aiohttp.ClientSession | None = None
         self._status = ExchangeStatus.UNKNOWN
@@ -111,43 +127,60 @@ class BaseDexAdapter(ExchangeAdapter):
     def withdrawals_enabled(self, base_asset: str, network: str | None) -> bool:
         return True
 
-    # ── JSON-RPC with failover (§2.4) ──
+    # ── JSON-RPC with health-aware failover (§2.4) ──
     async def rpc_call(self, method: str, params: list) -> object | None:
         if not self._rpc_urls or self._session is None:
             return None
-        attempts = len(self._rpc_urls)
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        # Try healthy providers first (round-robin), disabled ones only as probes. A
+        # dead endpoint is skipped entirely, so discovery keeps working off the healthy
+        # ones instead of burning an attempt on the same 403 every cycle.
+        order = self._rpc_pool.order()
         last_err: str | None = None
-        for _ in range(attempts):
-            url = self._rpc_urls[self._rpc_idx % len(self._rpc_urls)]
+        for url in order:
             await self._limiter.acquire()
             try:
-                async with self._session.post(
-                    url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-                ) as resp:
+                async with self._session.post(url, json=payload) as resp:
                     if resp.status != 200:
-                        # 429/403 here is the usual production failure: the host's IP is
-                        # rate-limited/blocked by that public RPC. Carry the status so the
-                        # exhaustion log below names the real cause (not a generic None).
-                        raise ConnectionError(f"http {resp.status}")
+                        # 429/403 is the usual production failure: the host's IP is
+                        # rate-limited/blocked by that public RPC. Classify so a block
+                        # backs off harder than a transient RPC error, and so the log
+                        # names the real cause.
+                        kind = (RpcErrorKind.RATE_LIMIT if resp.status == 429
+                                else RpcErrorKind.HTTP)
+                        raise _RpcFailure(kind, f"http {resp.status}")
                     data = await resp.json(content_type=None)
                     if "error" in data:
-                        raise ValueError(str(data["error"]))
+                        raise _RpcFailure(RpcErrorKind.RPC_ERROR, str(data["error"]))
                     result = data.get("result")
                     if result is None:
                         # Some public nodes answer 200 with a null result when degraded.
                         # Treat as a provider failure and fail over instead of returning
-                        # None (which would short-circuit the chain and look like an outage).
-                        raise ValueError("null result")
+                        # None (which would look like an outage to the caller).
+                        raise _RpcFailure(RpcErrorKind.RPC_ERROR, "null result")
+                    self._rpc_pool.record_success(url)
                     return result
-            except Exception as exc:  # noqa: BLE001 — failover to next provider
+            except _RpcFailure as exc:
+                self._rpc_pool.record_failure(url, exc.kind)
                 last_err = describe_exc(exc)
-                log.debug("rpc_failover", network=self.network, url=url, error=last_err)
-                self._rpc_idx += 1
-        # Every provider failed — this is what silently offlines the Ethereum DEX venues.
-        # Log it at WARNING so production shows exactly which network/method/cause failed
+                log.debug("rpc_failover", network=self.network, url=url,
+                          kind=exc.kind.value, error=last_err)
+            except (TimeoutError, aiohttp.ServerTimeoutError):
+                self._rpc_pool.record_failure(url, RpcErrorKind.TIMEOUT)
+                last_err = "timeout"
+                log.debug("rpc_failover", network=self.network, url=url,
+                          kind=RpcErrorKind.TIMEOUT.value, error=last_err)
+            except Exception as exc:  # noqa: BLE001 — connection reset / DNS / TLS
+                self._rpc_pool.record_failure(url, RpcErrorKind.HTTP)
+                last_err = describe_exc(exc)
+                log.debug("rpc_failover", network=self.network, url=url,
+                          kind=RpcErrorKind.HTTP.value, error=last_err)
+        # Every provider tried this call failed — log at WARNING with the full per-provider
+        # health snapshot so production shows exactly which endpoints are down and why,
         # instead of a mute None that only surfaces later as "API Offline".
         log.warning("rpc_all_providers_failed", venue=getattr(self, "id", None),
-                    network=self.network, method=method, providers=attempts, error=last_err)
+                    network=self.network, method=method, providers=len(order),
+                    error=last_err, health=self._rpc_pool.snapshot())
         return None
 
     async def eth_call(self, to: str, data: str) -> str | None:

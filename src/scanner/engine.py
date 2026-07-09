@@ -169,6 +169,18 @@ class ScanningEngine:
             except Exception as exc:  # noqa: BLE001
                 log.warning("detector_error", detector=detector.arb_type, error=describe_exc(exc))
         self._metrics.record_detection((time.perf_counter() - started) * 1000)
+        # Collapse duplicate opportunities within this tick: several detectors (and
+        # repeated cache-write events for the same pair) can emit the same venue-pair
+        # opportunity, and assembling each one runs the full profit pipeline. Keep only
+        # the highest-gross candidate per dedup key so no work is done twice.
+        if len(candidates) > 1:
+            best: dict[tuple, Candidate] = {}
+            for cand in candidates:
+                key = cand.dedup_key()
+                cur = best.get(key)
+                if cur is None or cand.gross_spread_pct > cur.gross_spread_pct:
+                    best[key] = cand
+            candidates = list(best.values())
         for cand in candidates:
             self._metrics.record_candidate()
             log.debug("candidate_created", arb_type=cand.arb_type.value,
@@ -196,10 +208,18 @@ class ScanningEngine:
             self._metrics.record_pair_signal(cand.buy_leg.venue, cand.sell_leg.venue)
 
     def _detection_context(self) -> DetectionContext:
-        return DetectionContext(
-            cache=self._cache, health=self._health, venues=self._venue_info,
-            verified_tokens=self._verified_tokens,
-        )
+        # DetectionContext holds only stable references (cache, health, venue map,
+        # verified-token set) — none of which change per tick. Build it once and reuse
+        # it to avoid allocating a fresh context (and re-copying the token set) on every
+        # opportunity check in the hot loop.
+        ctx = getattr(self, "_ctx", None)
+        if ctx is None:
+            ctx = DetectionContext(
+                cache=self._cache, health=self._health, venues=self._venue_info,
+                verified_tokens=self._verified_tokens,
+            )
+            self._ctx = ctx
+        return ctx
 
     # ── reconciliation safety net (§1.5) ──
     async def _run_full_scan(self) -> None:

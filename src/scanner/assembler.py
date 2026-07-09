@@ -66,11 +66,50 @@ class SignalAssembler:
         self._confidence = ConfidenceScorer(config)
         self._ranker = RankingEngine(config)
         self._reliability = reliability_provider
+        # Cached immutable venue taker-fee *rates* (§8.3). taker_fee() is a per-venue
+        # constant for every current adapter, so memoize it once and reuse it in the
+        # hot-loop pre-gate below instead of reconstructing a CanonicalSymbol and
+        # re-dispatching per candidate (thousands of candidates/sec).
+        self._fee_rate_cache: dict[str, Decimal] = {}
 
     def update_config(self, config: ScannerConfig) -> None:
         self._config = config
         for comp in (self._profit, self._liquidity, self._confidence, self._ranker):
             comp.update_config(config)
+
+    def _fee_rate(self, venue: str) -> Decimal | None:
+        """Memoized taker-fee rate for a venue (fraction, e.g. 0.001). None if the
+        adapter is unknown — caller then skips the pre-gate and takes the full path."""
+        cached = self._fee_rate_cache.get(venue)
+        if cached is not None:
+            return cached
+        adapter = self._adapters.get(venue)
+        if adapter is None:
+            return None
+        from src.domain.enums import VenueType
+        from src.domain.market import CanonicalSymbol
+        vt = VenueType.DEX if adapter.venue_type == VenueType.DEX else VenueType.CEX
+        rate = adapter.taker_fee(CanonicalSymbol("_", "_", vt))
+        self._fee_rate_cache[venue] = rate
+        return rate
+
+    def _fee_floor_pct(self, cand: Candidate) -> Decimal | None:
+        """Lower bound (in %) on the cost the spread must clear for any net profit.
+
+        Uses only the size-independent components — the round-trip taker-fee *rate*
+        and the stablecoin cross-quote conversion — both of which the profit engine
+        also charges. Every omitted cost (slippage/withdrawal/gas/bridge) is >= 0, so
+        this stays a strict lower bound: a candidate skipped here is guaranteed to
+        fail downstream too. Returns None (skip the pre-gate) if either venue's fee
+        rate is unknown, so nothing is ever wrongly rejected."""
+        buy_rate = self._fee_rate(cand.buy_leg.venue)
+        sell_rate = self._fee_rate(cand.sell_leg.venue)
+        if buy_rate is None or sell_rate is None:
+            return None
+        floor = (buy_rate + sell_rate) * Decimal(100)
+        if cand.quote_asset == "cross":
+            floor += Decimal(str(self._config.stablecoin_crossquote_bps)) / Decimal(100)
+        return floor
 
     async def assemble(self, cand: Candidate) -> AssemblyResult:
         if cand.arb_type == ArbitrageType.FUNDING:
@@ -79,6 +118,24 @@ class SignalAssembler:
 
     # ── spot / DEX / cross-chain path ──
     async def _assemble_spot(self, cand: Candidate) -> AssemblyResult:
+        # ── cheap fee-rate pre-gate (§8 early-exit floor) ──────────────────────
+        # net_pct is bounded above by gross_spread_pct minus the trading-fee rate
+        # and the (size-independent) conversion cost — every other cost (slippage,
+        # withdrawal, gas, bridge) only lowers it further. So if the spread cannot
+        # even clear that floor, the candidate is provably a BELOW_MIN_PROFIT /
+        # UNPROFITABLE_AFTER_FEES reject at *every* size. Reject it here, before the
+        # expensive book fetch + 4-point sizing sweep + liquidity/confidence/ranking/
+        # validation pipeline. This is exact — it only skips candidates that could
+        # never publish — so detection accuracy and the set of valid signals are
+        # unchanged; it just stops burning CPU on the ~40k/45k doomed candidates.
+        floor = self._fee_floor_pct(cand)
+        if floor is not None:
+            gross = cand.gross_spread_pct
+            if gross <= floor:
+                return AssemblyResult(None, RejectReason.UNPROFITABLE_AFTER_FEES)
+            if gross - floor < Decimal(str(self._config.min_roi_pct)):
+                return AssemblyResult(None, RejectReason.BELOW_MIN_PROFIT)
+
         buy_book = self._book_for(cand.buy_leg.venue, cand)
         sell_book = self._book_for(cand.sell_leg.venue, cand)
         if buy_book is None or sell_book is None:
