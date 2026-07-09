@@ -9,7 +9,6 @@ from src.config.scanner_config import ScannerConfig
 from src.config.settings import Settings
 from src.scanner.adapters.cex.binance import BinanceAdapter
 from src.scanner.adapters.cex.bitget import BitgetAdapter
-from src.scanner.adapters.cex.bybit import BybitAdapter
 from src.scanner.adapters.cex.mexc import MexcAdapter
 from src.scanner.adapters.cex.okx import OkxAdapter
 
@@ -24,7 +23,6 @@ async def test_heartbeat_frames_match_venue_protocol():
     assert _a(MexcAdapter)._heartbeat_frame() == {"method": "PING"}
     assert _a(OkxAdapter)._heartbeat_frame() == "ping"
     assert _a(BitgetAdapter)._heartbeat_frame() == "ping"
-    assert _a(BybitAdapter)._heartbeat_frame() == {"op": "ping"}
     # Binance server pings us; aiohttp autoping answers -> no app frame needed.
     assert _a(BinanceAdapter)._heartbeat_frame() is None
 

@@ -41,7 +41,7 @@ def test_filter_coin_and_exchange_and_logic():
     f = UserFilter(coins=frozenset({"ETH"}), exchanges=frozenset({"binance"}))
     assert f.matches(_signal())
     assert not f.matches(_signal(coin="BTC"))
-    assert not f.matches(_signal(buy_exchange="bybit", sell_exchange="okx"))
+    assert not f.matches(_signal(buy_exchange="mexc", sell_exchange="okx"))
 
 
 def test_filter_risk_threshold():

@@ -398,7 +398,8 @@ class SignalAssembler:
             reliability = self._reliability(cand.arb_type.value, cand.buy_leg.venue,
                                             cand.sell_leg.venue)
         required = 5
-        completeness = Decimal(len(breakdown.resolved_categories)) / Decimal(required) * Decimal(100)
+        completeness = (Decimal(len(breakdown.resolved_categories))
+                        / Decimal(required) * Decimal(100))
         return ConfidenceInputs(
             price_freshness=max(Decimal(0), fresh), liquidity_score=liq_score,
             spread_stability=stability, exchange_health=health,

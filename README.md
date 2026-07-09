@@ -21,7 +21,7 @@ mapping of every requirement to its implementation.
   5 arbitrage detectors (CEX↔CEX, CEX↔DEX, DEX↔DEX, Funding, Cross-Chain), a shared profit
   engine, liquidity analysis, validation gates, ranking, confidence scoring, cooldown, and
   a full signal lifecycle.
-- **8 modular exchange adapters** (Binance, Bybit, OKX, Bitget, MEXC + Uniswap, PancakeSwap,
+- **7 modular exchange adapters** (Binance, OKX, Bitget, MEXC + Uniswap, PancakeSwap,
   Jupiter) behind one shared interface — adding a venue is one new module, zero engine changes.
 - **Complete Telegram bot**: onboarding, Main Menu, Signal List/Details, Search, Filtering,
   Notifications, Settings, Subscription/billing, Favorites, History, Profile, Support, and a

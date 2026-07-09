@@ -59,7 +59,8 @@ class ProfitEngine:
         net = gross - trading_fees - withdrawal - gas - bridge - slippage_cost - conversion
         capital = size_usd  # buy-side notional (+margin handled by funding detector)
         roi = (net / capital * Decimal(100)) if capital else Decimal(0)
-        gross_spread_pct = ((sell_best - buy_best) / buy_best * Decimal(100)) if buy_best else Decimal(0)
+        gross_spread_pct = (((sell_best - buy_best) / buy_best * Decimal(100))
+                            if buy_best else Decimal(0))
         net_pct = (net / capital * Decimal(100)) if capital else Decimal(0)
 
         return ProfitBreakdown(

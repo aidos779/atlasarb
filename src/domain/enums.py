@@ -5,10 +5,10 @@ Cross-references: PRD §3.8 (arb types), §3.9 (status/risk), §5.1 (roles),
 """
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ArbitrageType(str, Enum):
+class ArbitrageType(StrEnum):
     """PRD §3.8 authoritative list."""
 
     CEX_CEX = "CEX_CEX"
@@ -28,7 +28,7 @@ class ArbitrageType(str, Enum):
         }[self.value]
 
 
-class SignalStatus(str, Enum):
+class SignalStatus(StrEnum):
     """PRD §3.9. Hidden is always per-user (R-SCHEMA-1)."""
 
     ACTIVE = "Active"
@@ -36,7 +36,7 @@ class SignalStatus(str, Enum):
     HIDDEN = "Hidden"
 
 
-class RiskScore(str, Enum):
+class RiskScore(StrEnum):
     """PRD §10.5 three-level classification."""
 
     LOW = "Low"
@@ -53,7 +53,7 @@ class RiskScore(str, Enum):
         return {"Low": 1, "Medium": 3, "High": 5}[self.value]
 
 
-class RankingLevel(str, Enum):
+class RankingLevel(StrEnum):
     """PRD §19 / Scanner §11."""
 
     TOP = "TOP"
@@ -66,7 +66,7 @@ class RankingLevel(str, Enum):
         return {"TOP": "⭐", "HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪"}[self.value]
 
 
-class ExchangeStatus(str, Enum):
+class ExchangeStatus(StrEnum):
     """PRD §20 / Scanner §14."""
 
     ONLINE = "Online"
@@ -89,12 +89,12 @@ class ExchangeStatus(str, Enum):
         return self is ExchangeStatus.ONLINE
 
 
-class VenueType(str, Enum):
+class VenueType(StrEnum):
     CEX = "CEX"
     DEX = "DEX"
 
 
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     """PRD §5.1."""
 
     VISITOR = "visitor"
@@ -104,7 +104,7 @@ class UserRole(str, Enum):
     ADMIN = "admin"
 
 
-class SubscriptionTier(str, Enum):
+class SubscriptionTier(StrEnum):
     """PRD §15."""
 
     FREE = "free"
@@ -112,14 +112,14 @@ class SubscriptionTier(str, Enum):
     PRO = "pro"
 
 
-class SubscriptionStatus(str, Enum):
+class SubscriptionStatus(StrEnum):
     ACTIVE = "active"
     PAST_DUE = "past_due"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
 
 
-class Network(str, Enum):
+class Network(StrEnum):
     """PRD §3.5 supported networks."""
 
     ETHEREUM = "ethereum"
@@ -143,20 +143,20 @@ class Network(str, Enum):
         }[self.value]
 
 
-class QuoteAsset(str, Enum):
+class QuoteAsset(StrEnum):
     """PRD §3.6 — MVP scans USDT/USDC only."""
 
     USDT = "USDT"
     USDC = "USDC"
 
 
-class Language(str, Enum):
+class Language(StrEnum):
     EN = "en"
     RU = "ru"
     KK = "kk"
 
 
-class Currency(str, Enum):
+class Currency(StrEnum):
     USD = "USD"
     EUR = "EUR"
     KZT = "KZT"
@@ -164,7 +164,7 @@ class Currency(str, Enum):
     USDT = "USDT"
 
 
-class RejectReason(str, Enum):
+class RejectReason(StrEnum):
     """Scanner §10 validation reject reasons + §15.5 / §3.2."""
 
     BELOW_MIN_PROFIT = "BELOW_MIN_PROFIT"
@@ -184,7 +184,7 @@ class RejectReason(str, Enum):
     NO_VIABLE_SIZE = "NO_VIABLE_SIZE"
 
 
-class ExpiryReason(str, Enum):
+class ExpiryReason(StrEnum):
     """Scanner §12.4."""
 
     TTL_EXCEEDED = "TTL_EXCEEDED"

@@ -1,6 +1,6 @@
 """Adapter registry / factory (composition of the exchange layer).
 
-Builds all 8 MVP adapters (5 CEX + Uniswap across EVM networks + PancakeSwap + Jupiter)
+Builds all MVP adapters (4 CEX + Uniswap across EVM networks + PancakeSwap + Jupiter)
 against the shared cache sink and health registry, wiring each adapter's success/failure
 into the Exchange Health Registry (§2.2/§14). Adding a Future Exchange (§3.4) is one new
 adapter class + one line here — zero engine changes (ARCH-1 / FR-SIG-09).
@@ -14,7 +14,6 @@ from src.config.settings import Settings
 from src.domain.ports import ExchangeAdapter
 from src.scanner.adapters.cex.binance import BinanceAdapter
 from src.scanner.adapters.cex.bitget import BitgetAdapter
-from src.scanner.adapters.cex.bybit import BybitAdapter
 from src.scanner.adapters.cex.mexc import MexcAdapter
 from src.scanner.adapters.cex.okx import OkxAdapter
 from src.scanner.adapters.dex.jupiter import JupiterAdapter
@@ -35,7 +34,7 @@ from src.scanner.adapters.withdrawal_fees import WithdrawalFeeProvider
 from src.scanner.cache.market_state_cache import MarketStateCache
 from src.scanner.status.health_registry import HealthRegistry
 
-_CEX_CLASSES = [BinanceAdapter, BybitAdapter, OkxAdapter, BitgetAdapter, MexcAdapter]
+_CEX_CLASSES = [BinanceAdapter, OkxAdapter, BitgetAdapter, MexcAdapter]
 
 
 @dataclass

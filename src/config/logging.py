@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 
 import structlog
 
@@ -43,6 +44,38 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
+
+
+class LogThrottle:
+    """Aggregate identical log events so a repeating failure emits once per window.
+
+    ``allow(key)`` returns ``(emit, suppressed)``: ``emit`` is True when the caller
+    should log now, and ``suppressed`` is how many identical events were swallowed
+    since the last emission (include it in the log record so nothing is lost).
+    The first occurrence of a key always emits — errors are never delayed, only
+    their repetitions are collapsed.
+    """
+
+    def __init__(self, interval_sec: float = 60.0) -> None:
+        self._interval = interval_sec
+        self._last_emit: dict[object, float] = {}
+        self._suppressed: dict[object, int] = {}
+
+    def allow(self, key: object, now: float | None = None) -> tuple[bool, int]:
+        now = time.monotonic() if now is None else now
+        last = self._last_emit.get(key)
+        if last is None or now - last >= self._interval:
+            suppressed = self._suppressed.pop(key, 0)
+            self._last_emit[key] = now
+            # Bound the key set: drop stale entries opportunistically.
+            if len(self._last_emit) > 512:
+                cutoff = now - self._interval * 4
+                for k in [k for k, t in self._last_emit.items() if t < cutoff]:
+                    self._last_emit.pop(k, None)
+                    self._suppressed.pop(k, None)
+            return True, suppressed
+        self._suppressed[key] = self._suppressed.get(key, 0) + 1
+        return False, 0
 
 
 def describe_exc(exc: BaseException) -> str:

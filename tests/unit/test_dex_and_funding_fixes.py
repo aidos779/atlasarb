@@ -75,18 +75,18 @@ async def _assemble_funding(annual_spread: str):
     cfg = ScannerConfig()
     cache = MarketStateCache(cfg)
     health = HealthRegistry(cfg)
-    adapters = {"binance": _Ad("binance"), "bybit": _Ad("bybit")}
+    adapters = {"binance": _Ad("binance"), "okx": _Ad("okx")}
     for v in adapters:
         health.register(v)
         for _ in range(3):
             health.record_success(v, stream=True)
     now = time.time()
     cache.upsert_funding(FundingRate("binance", "ETH", Decimal("0"), None, now + 3600, 8))
-    cache.upsert_funding(FundingRate("bybit", "ETH", Decimal("0"), None, now + 3600, 8))
+    cache.upsert_funding(FundingRate("okx", "ETH", Decimal("0"), None, now + 3600, 8))
     asm = SignalAssembler(cfg, cache, health, adapters, _Gas(), PriorityClassifier(cfg))
     cand = Candidate(arb_type=ArbitrageType.FUNDING, base_asset="ETH", quote_asset="USDT",
                      buy_leg=LegRef("binance", "CEX", Decimal(1)),
-                     sell_leg=LegRef("bybit", "CEX", Decimal(1)),
+                     sell_leg=LegRef("okx", "CEX", Decimal(1)),
                      gross_spread_pct=Decimal("0"),
                      funding_annualized_spread=Decimal(annual_spread),
                      funding_next_time=now + 3600)

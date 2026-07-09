@@ -13,7 +13,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
@@ -21,7 +21,7 @@ class ConfigError(ValueError):
     """Raised when a configuration change is invalid (§20.3 — all-or-nothing)."""
 
 
-class ArbType(str, Enum):
+class ArbType(StrEnum):
     CEX_CEX = "CEX_CEX"
     CEX_DEX = "CEX_DEX"
     DEX_DEX = "DEX_DEX"
@@ -114,8 +114,11 @@ class ScannerConfig:
     # ── DEX RPC provider health (§2.4 failover) ──
     # Consecutive failures before a provider is temporarily disabled; cooldown grows
     # from base to cap as it keeps failing, then it is probed again (auto-recovery).
-    rpc_provider_fail_threshold: int = 3
-    rpc_provider_cooldown_sec: float = 30.0
+    # Threshold 5 tolerates isolated/short-lived blips (a public node dropping 2-3
+    # requests) without pulling the provider from rotation; a genuinely dead endpoint
+    # still trips quickly because its failures are consecutive.
+    rpc_provider_fail_threshold: int = 5
+    rpc_provider_cooldown_sec: float = 20.0
     rpc_provider_cooldown_max_sec: float = 300.0
 
     # ── Health / staleness (§2.2, §4.4, §16) ──

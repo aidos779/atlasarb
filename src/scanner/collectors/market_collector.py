@@ -16,6 +16,7 @@ from src.config.scanner_config import ScannerConfig
 from src.domain.enums import VenueType
 from src.domain.market import CanonicalSymbol
 from src.domain.ports import ExchangeAdapter
+from src.scanner.adapters.backoff import backoff_delay
 from src.scanner.cache.market_state_cache import MarketStateCache
 from src.scanner.priority.scheduler import PriorityClassifier
 
@@ -52,7 +53,9 @@ class MarketCollector:
 
     async def _get_markets_retry(self, adapter: ExchangeAdapter) -> list[CanonicalSymbol]:
         """Bounded retry so a transient timeout doesn't blank a venue until the next
-        discovery cycle (minutes away). Re-raises the last error if all attempts fail."""
+        discovery cycle (minutes away). Exponential backoff with jitter between
+        attempts (each retry may land on a rotated host/proxy — see BaseCexAdapter).
+        Re-raises the last error if all attempts fail."""
         last: Exception | None = None
         for attempt in range(self._config.rest_max_attempts):
             try:
@@ -60,7 +63,8 @@ class MarketCollector:
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 if attempt + 1 < self._config.rest_max_attempts:
-                    await asyncio.sleep(0.5 * (attempt + 1))
+                    await asyncio.sleep(backoff_delay(
+                        attempt, base=0.5, multiplier=2.0, cap=10.0, jitter=0.5))
         assert last is not None
         raise last
 

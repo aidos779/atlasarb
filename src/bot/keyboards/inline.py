@@ -76,7 +76,8 @@ def signal_list_controls(lang: str, sort_mode: str, page: int, total_pages: int,
     # Per-card action rows.
     for signal, is_fav in cards:
         b.row(
-            InlineKeyboardButton(text=f"🔍 {signal.coin}", callback_data=f"sig:details:{signal.id}"),
+            InlineKeyboardButton(text=f"🔍 {signal.coin}",
+                                 callback_data=f"sig:details:{signal.id}"),
             InlineKeyboardButton(
                 text=t("btn.unfavorite" if is_fav else "btn.favorite", lang),
                 callback_data=f"sig:fav:{signal.id}"),

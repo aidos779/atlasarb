@@ -59,7 +59,8 @@ class JupiterAdapter(BaseDexAdapter):
     # ── discovery (verified catalog ∩ §3.4 allowlist) ──
     async def _maybe_discover(self) -> None:
         now = time.time()
-        if self._discovered_at and now - self._discovered_at < self._config.dex_discovery_interval_sec:
+        if (self._discovered_at
+                and now - self._discovered_at < self._config.dex_discovery_interval_sec):
             return
         if self._session is None:
             return

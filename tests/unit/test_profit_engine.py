@@ -1,8 +1,8 @@
 from decimal import Decimal
 
 from src.config.scanner_config import ScannerConfig
-from src.domain.market import BookLevel, CanonicalSymbol, OrderBook
 from src.domain.enums import VenueType
+from src.domain.market import BookLevel, CanonicalSymbol, OrderBook
 from src.scanner.profit.engine import ProfitEngine
 from src.scanner.profit.liquidity_leg import CexBookLeg
 from src.scanner.profit.models import FeeInputs

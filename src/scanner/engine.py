@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from src.config import describe_exc, get_logger
+from src.config import LogThrottle, describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
 from src.domain.enums import ExchangeStatus, ExpiryReason
 from src.domain.ports import (
@@ -39,6 +39,10 @@ from src.scanner.reconciliation.scheduler import ReconciliationScheduler
 from src.scanner.status.health_registry import HealthRegistry
 
 log = get_logger("scanner.engine")
+
+# A detector that starts throwing does so for every cache write — aggregate the
+# identical warnings instead of emitting one per tick.
+_detector_log_throttle = LogThrottle(interval_sec=60.0)
 
 
 class ScanningEngine:
@@ -167,7 +171,12 @@ class ScanningEngine:
             try:
                 candidates.extend(detector.detect(ctx, base, quote))
             except Exception as exc:  # noqa: BLE001
-                log.warning("detector_error", detector=detector.arb_type, error=describe_exc(exc))
+                emit, suppressed = _detector_log_throttle.allow(
+                    (detector.arb_type, type(exc).__name__))
+                if emit:
+                    log.warning("detector_error", detector=detector.arb_type,
+                                error=describe_exc(exc),
+                                repeats_suppressed=suppressed)
         self._metrics.record_detection((time.perf_counter() - started) * 1000)
         # Collapse duplicate opportunities within this tick: several detectors (and
         # repeated cache-write events for the same pair) can emit the same venue-pair
@@ -261,10 +270,54 @@ class ScanningEngine:
             self._health.record_failure(venue)
             self._metrics.record_api_failure(venue)
 
+    def _engine_status_summary(self, minutes: float,
+                               prev: dict[str, int]) -> dict[str, object]:
+        """Compact per-interval health summary: venue availability, RPC provider
+        health, and signal/error rates — the at-a-glance "Engine Status" line."""
+        statuses = self._health.all_statuses()
+        cex = [v for v, a in self._adapters.items() if a.venue_type.value == "CEX"]
+        dex = [v for v, a in self._adapters.items() if a.venue_type.value == "DEX"]
+        cex_online = sum(1 for v in cex if statuses[v].signal_allowed)
+        dex_online = sum(1 for v in dex if statuses[v].signal_allowed)
+        # One RPC pool per EVM network (adapters on the same network share the URL
+        # set but track health independently — report the best view per network).
+        rpc_by_network: dict[str, tuple[int, int]] = {}
+        for adapter in self._adapters.values():
+            pool = getattr(adapter, "_rpc_pool", None)
+            network = getattr(adapter, "network", None)
+            if pool is None or network is None:
+                continue
+            healthy, total = pool.healthy_count()
+            best = rpc_by_network.get(network)
+            if best is None or healthy > best[0]:
+                rpc_by_network[network] = (healthy, total)
+        rpc_healthy = sum(h for h, _ in rpc_by_network.values())
+        rpc_total = sum(t for _, t in rpc_by_network.values())
+        m = self._metrics
+        errors_now = sum(m.api_failures.values())
+        summary = {
+            "cex_online": f"{cex_online}/{len(cex)}",
+            "dex_online": f"{dex_online}/{len(dex)}",
+            "rpc_healthy": f"{rpc_healthy}/{rpc_total}",
+            "signals_per_min": round((m.signals_created - prev["signals"]) / minutes, 2),
+            "errors_per_min": round((errors_now - prev["errors"]) / minutes, 2),
+            "notifications_per_min": round(
+                (m.notifications_sent - prev["notifications"]) / minutes, 2),
+        }
+        prev.update(signals=m.signals_created, errors=errors_now,
+                    notifications=m.notifications_sent)
+        return summary
+
     async def _stats_loop(self) -> None:
-        """Emit an ENGINE STATS diagnostic line every 60s (§17) so pipeline health
-        after discovery is observable at a glance."""
+        """Periodic observability (§17) tuned for readable logs:
+
+        - every 3 min: compact ``engine_status`` health summary (venues online,
+          RPC providers healthy, signals/min, errors/min);
+        - every 5 min: full ``engine_stats`` pipeline funnel;
+        - every 15 min: per venue-pair funnel breakdown.
+        """
         tick = 0
+        prev_rates = {"signals": 0, "errors": 0, "notifications": 0}
         while not self._stop.is_set():
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=60.0)
@@ -274,33 +327,37 @@ class ScanningEngine:
                 break
             tick += 1
             m = self._metrics
-            buckets = m.rejections_by_bucket()
-            online = sum(1 for s in self._health.all_statuses().values()
-                         if s.signal_allowed)
-            total_books, multi_venue_pairs = self._cache.book_coverage()
-            log.info(
-                "engine_stats",
-                venues_online=online, venues_total=len(self._adapters),
-                cache_size=self._cache.size(),
-                tracked_pairs=len(self._cache.tracked_pairs()),
-                fresh_books=total_books,
-                pairs_with_2plus_books=multi_venue_pairs,
-                queue_pending=self._event_queue.pending(),
-                snapshots_received=m.snapshots_received,
-                opportunities_checked=m.opportunities_checked,
-                candidates_created=m.candidates_generated,
-                rejected_by_fees=buckets["fees"],
-                rejected_by_spread=buckets["spread"],
-                rejected_by_liquidity=buckets["liquidity"],
-                rejected_by_freshness=buckets["freshness"],
-                rejected_by_risk=buckets["risk"],
-                signals_published=m.signals_created,
-                telegram_sent=m.notifications_sent,
-                reject_reasons=dict(m.rejections),
-            )
-            # Per venue-pair funnel every 5 min (§17) — the engine exposes the
-            # numbers directly; no DEBUG log parsing required.
+            if tick % 3 == 0:
+                log.info("engine_status",
+                         **self._engine_status_summary(3.0, prev_rates))
             if tick % 5 == 0:
+                buckets = m.rejections_by_bucket()
+                online = sum(1 for s in self._health.all_statuses().values()
+                             if s.signal_allowed)
+                total_books, multi_venue_pairs = self._cache.book_coverage()
+                log.info(
+                    "engine_stats",
+                    venues_online=online, venues_total=len(self._adapters),
+                    cache_size=self._cache.size(),
+                    tracked_pairs=len(self._cache.tracked_pairs()),
+                    fresh_books=total_books,
+                    pairs_with_2plus_books=multi_venue_pairs,
+                    queue_pending=self._event_queue.pending(),
+                    snapshots_received=m.snapshots_received,
+                    opportunities_checked=m.opportunities_checked,
+                    candidates_created=m.candidates_generated,
+                    rejected_by_fees=buckets["fees"],
+                    rejected_by_spread=buckets["spread"],
+                    rejected_by_liquidity=buckets["liquidity"],
+                    rejected_by_freshness=buckets["freshness"],
+                    rejected_by_risk=buckets["risk"],
+                    signals_published=m.signals_created,
+                    telegram_sent=m.notifications_sent,
+                    reject_reasons=dict(m.rejections),
+                )
+            # Per venue-pair funnel (§17) — the engine exposes the numbers
+            # directly; no DEBUG log parsing required.
+            if tick % 15 == 0:
                 for pair, counters in m.venue_pair_snapshot().items():
                     log.info("venue_pair_stats", pair=pair, **counters)
 

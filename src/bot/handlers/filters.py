@@ -84,7 +84,7 @@ def _multiselect_options(field: str, profile: UserProfile, ctx_engine):
         return ([tp.value for tp in ent.allowed_arb_types],
                 {tp.value for tp in f.arb_types})
     if field == "exchange":
-        return (["binance", "bybit", "okx", "bitget", "mexc",
+        return (["binance", "okx", "bitget", "mexc",
                  "uniswap_ethereum", "pancakeswap_bnb", "jupiter"], set(f.exchanges))
     # coin
     return (["BTC", "ETH", "SOL", "BNB", "ARB", "OP", "MATIC"], set(f.coins))

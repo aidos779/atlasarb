@@ -200,7 +200,7 @@ async def test_cross_chain_signal_end_to_end():
 
 async def test_funding_signal_end_to_end():
     cfg = _permissive_cfg()
-    adapters = {"binance": FakeCex("binance"), "bybit": FakeCex("bybit")}
+    adapters = {"binance": FakeCex("binance"), "okx": FakeCex("okx")}
     cache = MarketStateCache(cfg)
     health = HealthRegistry(cfg)
     _online(health, *adapters)
@@ -209,9 +209,9 @@ async def test_funding_signal_end_to_end():
                             cache=cache, health=health, perp_assets={"ETH"})
     import time
     nxt = time.time() + 3600
-    # Large funding differential (long binance @ -0.05%, short bybit @ +0.05% per 8h).
+    # Large funding differential (long binance @ -0.05%, short okx @ +0.05% per 8h).
     cache.upsert_funding(FundingRate("binance", "ETH", Decimal("-0.0005"), None, nxt, 8))
-    cache.upsert_funding(FundingRate("bybit", "ETH", Decimal("0.0005"), None, nxt, 8))
+    cache.upsert_funding(FundingRate("okx", "ETH", Decimal("0.0005"), None, nxt, 8))
 
     await engine._process_symbol("ETH", "USDT")
 

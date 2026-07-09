@@ -1,9 +1,10 @@
 """Base CEX adapter (Scanner §2, §3.3, §4, §5).
 
-Handles the transport concerns common to all 5 CEX venues: aiohttp REST session,
+Handles the transport concerns common to all CEX venues: aiohttp REST session,
 persistent WebSocket with §2.3 reconnect/backoff, token-bucket limiting, symbol
-normalization, and health reporting. Concrete venues implement only their venue-specific
-REST/WS wire formats — proving the ARCH-1 adapter pattern (one module per venue).
+normalization, health reporting, and an optional per-venue proxy chain with automatic
+failover. Concrete venues implement only their venue-specific REST/WS wire formats —
+proving the ARCH-1 adapter pattern (one module per venue).
 
 Data sources are official REST (metadata) + official WS (real-time) only (ARCH-2).
 NFR-SEC-01: public market-data endpoints only — no user API keys anywhere.
@@ -14,21 +15,42 @@ import asyncio
 import contextlib
 from abc import abstractmethod
 from decimal import Decimal
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+import orjson
 
-from src.config import describe_exc, get_logger
+from src.config import LogThrottle, describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
 from src.config.settings import Settings
 from src.domain.enums import ExchangeStatus, VenueType
 from src.domain.market import CanonicalSymbol, FundingRate, OrderBook, PriceQuote
 from src.domain.ports import ExchangeAdapter, MarketDataSink
 from src.scanner.adapters.backoff import backoff_delay
+from src.scanner.adapters.errors import RestError
 from src.scanner.adapters.rate_limiter import TokenBucket
 from src.scanner.adapters.tls import ssl_context
 from src.scanner.adapters.withdrawal_fees import WithdrawalFeeProvider
 
 log = get_logger("adapter.cex")
+
+# One shared throttle for repeated identical transport warnings (same venue + status)
+# so a persistent 403/451 emits once a minute with a suppressed-count, not every retry.
+_http_log_throttle = LogThrottle(interval_sec=60.0)
+
+
+def redact_proxy(url: str) -> str:
+    """Hide any password in a proxy URL before logging (scheme://user:***@host:port)."""
+    try:
+        parts = urlsplit(url)
+        if parts.password:
+            netloc = f"{parts.username}:***@{parts.hostname}"
+            if parts.port:
+                netloc += f":{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except Exception:  # noqa: BLE001
+        return "***"
+    return url
 
 
 class BaseCexAdapter(ExchangeAdapter):
@@ -40,6 +62,7 @@ class BaseCexAdapter(ExchangeAdapter):
         rest_url: str, ws_url: str, rate_per_sec: float, burst: float,
         on_success=None, on_failure=None, withdrawal_fees: WithdrawalFeeProvider | None = None,
         rest_fallbacks: list[str] | None = None, ws_fallbacks: list[str] | None = None,
+        proxies: list[str] | None = None,
     ) -> None:
         self._settings = settings
         self._withdrawal_fees = withdrawal_fees or WithdrawalFeeProvider()
@@ -47,9 +70,9 @@ class BaseCexAdapter(ExchangeAdapter):
         self._sink = sink
         # REST/WS host chains: primary first, then venue-provided mirror hosts. Single-host
         # venues pass no fallbacks, so rotation is a no-op for them (behaviour unchanged).
-        # Rotation is what recovers a venue whose primary host is geo/IP-blocked (Binance
-        # data-api.binance.vision, Bybit api.bytick.com) — the "Online then API Offline"
-        # case where the primary connects then delivers nothing / returns an HTML block.
+        # Rotation is what recovers a venue whose primary host is geo/IP-blocked — the
+        # "Online then API Offline" case where the primary connects then delivers
+        # nothing / returns an HTML block.
         self._rest_urls = [rest_url.rstrip("/")] + [u.rstrip("/") for u in (rest_fallbacks or [])]
         self._ws_urls = [ws_url] + list(ws_fallbacks or [])
         self._rest_idx = 0
@@ -57,7 +80,7 @@ class BaseCexAdapter(ExchangeAdapter):
         self._limiter = TokenBucket(rate_per_sec, burst)
         self._session: aiohttp.ClientSession | None = None
         # WS is sharded across several connections: every venue caps subscriptions
-        # per connection (MEXC ~30 channels, Bybit/OKX a few hundred, Binance 1024
+        # per connection (MEXC ~30 channels, OKX a few hundred, Binance 1024
         # streams). Subscribing thousands of pairs on one socket silently failed, so
         # those venues delivered NO book data and their arbitrage was invisible.
         self._shards: list[set[str]] = []          # pairs owned by each shard
@@ -73,9 +96,58 @@ class BaseCexAdapter(ExchangeAdapter):
         self._on_success = on_success or (lambda latency=0.0, stream=False: None)
         self._on_failure = on_failure or (lambda hard=False: None)
         self._taker_fee = Decimal("0.001")   # 0.10% MVP default (§8.3)
-        # Redacted proxy label for logs; None means direct. Only Bybit sets it (per-adapter
-        # proxy). Kept here so the shared ws_connected log can report it generically.
-        self._proxy_log: str | None = None
+        # Optional per-venue proxy chain (primary first, then fallbacks). Empty = direct.
+        # The active proxy applies to both REST and WS because they share the session's
+        # connector; on repeated failure the chain rotates (proxy failover) and the
+        # session is rebuilt so subsequent requests egress through the next proxy.
+        self._proxies = [p.strip() for p in (proxies or []) if p and p.strip()]
+        self._proxy_idx = 0
+        self._rest_fail_streak = 0
+
+    # ── proxy chain (per-venue; e.g. Binance behind HTTP 451 geo-blocks) ──
+    @property
+    def _active_proxy(self) -> str | None:
+        if not self._proxies:
+            return None
+        return self._proxies[self._proxy_idx % len(self._proxies)]
+
+    @property
+    def _proxy_log(self) -> str | None:
+        """Redacted active-proxy label for log records; None means direct."""
+        proxy = self._active_proxy
+        return redact_proxy(proxy) if proxy else None
+
+    def _build_connector(self) -> aiohttp.BaseConnector:
+        proxy = self._active_proxy
+        if not proxy:
+            return aiohttp.TCPConnector(ssl=ssl_context())
+        # ProxyConnector.from_url handles http://, https://, socks4:// and socks5://;
+        # both REST (session.get) and WS (session.ws_connect) then egress through the
+        # proxy because they share this connector. certifi TLS is preserved end-to-end.
+        from aiohttp_socks import ProxyConnector  # lazy: only needed when a proxy is set
+        return ProxyConnector.from_url(proxy, ssl=ssl_context())
+
+    async def _rotate_proxy(self, reason: str) -> None:
+        """Advance to the next proxy in the chain and rebuild the session so future
+        REST calls and WS reconnects use it. No-op without at least two proxies."""
+        if len(self._proxies) < 2:
+            return
+        old = self._proxy_log
+        self._proxy_idx = (self._proxy_idx + 1) % len(self._proxies)
+        log.warning("proxy_failover", venue=self.id, previous=old,
+                    active=self._proxy_log, reason=reason)
+        await self._rebuild_session()
+
+    async def _rebuild_session(self) -> None:
+        old = self._session
+        timeout = aiohttp.ClientTimeout(total=self._config.cex_rest_timeout_sec)
+        self._session = aiohttp.ClientSession(timeout=timeout,
+                                              connector=self._build_connector())
+        if old is not None:
+            # Closing the old session drops its WS connections; shard loops detect the
+            # close and reconnect via _require_session(), picking up the new proxy.
+            with contextlib.suppress(Exception):
+                await old.close()
 
     # ── active REST/WS host (rotates across primary + mirror hosts on failure) ──
     @property
@@ -89,12 +161,18 @@ class BaseCexAdapter(ExchangeAdapter):
     def _rotate_rest(self) -> None:
         if len(self._rest_urls) > 1:
             self._rest_idx += 1
-            log.warning("rest_host_failover", venue=self.id, active=self._rest_url)
+            emit, suppressed = _http_log_throttle.allow((self.id, "rest_failover"))
+            if emit:
+                log.warning("rest_host_failover", venue=self.id, active=self._rest_url,
+                            repeats_suppressed=suppressed)
 
     def _rotate_ws(self) -> None:
         if len(self._ws_urls) > 1:
             self._ws_idx += 1
-            log.warning("ws_host_failover", venue=self.id, active=self._ws_url)
+            emit, suppressed = _http_log_throttle.allow((self.id, "ws_failover"))
+            if emit:
+                log.warning("ws_host_failover", venue=self.id, active=self._ws_url,
+                            repeats_suppressed=suppressed)
 
     # ── venue-specific hooks ──
     @abstractmethod
@@ -128,8 +206,11 @@ class BaseCexAdapter(ExchangeAdapter):
         timeout = aiohttp.ClientTimeout(total=self._config.cex_rest_timeout_sec)
         # certifi-backed TLS so REST + WSS verify against a known-good CA bundle
         # regardless of the host's system trust store (see adapters/tls.py).
-        connector = aiohttp.TCPConnector(ssl=ssl_context())
-        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        self._session = aiohttp.ClientSession(timeout=timeout,
+                                              connector=self._build_connector())
+        if self._active_proxy:
+            log.info("proxy_enabled", venue=self.id, proxy=self._proxy_log,
+                     fallbacks=max(0, len(self._proxies) - 1))
         # Shards are created lazily as pairs are discovered/subscribed.
 
     async def disconnect(self) -> None:
@@ -145,46 +226,67 @@ class BaseCexAdapter(ExchangeAdapter):
 
     async def _get_json_logged(self, session: aiohttp.ClientSession, url: str,
                                params: dict | None = None) -> object:
-        """GET + parse JSON, logging the raw HTTP status/headers/body BEFORE parsing.
+        """GET + parse JSON with strict HTTP error handling.
 
-        Discovery failures (e.g. Bybit's JSONDecodeError) happen when a venue returns a
-        non-JSON body — an HTML/CDN block or rate-limit page. Reading the body first turns
-        that opaque crash into an explicit diagnostic (status + body prefix) that
-        distinguishes a code bug from a geo/IP/rate-limit block. Raises on non-JSON so the
-        caller's retry/health path still triggers.
+        Any non-200 response is a transport failure, not a document: no JSON decoding is
+        attempted, a structured ``RestError`` (with the real HTTP status and a body
+        prefix) is raised immediately, and the warning is throttled so a persistent
+        403/451 block emits one aggregated line per minute instead of flooding the logs.
+        A 200 with a non-JSON body (CDN interstitial) raises the same structured error.
         """
         async with session.get(url, params=params) as resp:
-            body = await resp.text()
-            ctype = resp.headers.get("Content-Type", "")
-            snippet = body[:300].replace("\n", " ")
-            if resp.status != 200 or "json" not in ctype.lower():
-                log.warning("rest_non_json_response", venue=self.id, url=url,
-                            status=resp.status, content_type=ctype,
-                            retry_after=resp.headers.get("Retry-After"),
-                            cf_ray=resp.headers.get("cf-ray"),
-                            server=resp.headers.get("Server"), body_prefix=snippet)
-            else:
-                log.debug("rest_ok", venue=self.id, url=url, status=resp.status,
-                          bytes=len(body))
-            import orjson
+            if resp.status != 200:
+                snippet = (await resp.text())[:200].replace("\n", " ")
+                err = RestError(
+                    venue=self.id, url=url, status=resp.status,
+                    message="blocked (geo/CDN)" if resp.status in (403, 451)
+                            else "rate-limited" if resp.status == 429
+                            else "http error",
+                    body_prefix=snippet, retry_after=resp.headers.get("Retry-After"),
+                )
+                emit, suppressed = _http_log_throttle.allow((self.id, resp.status))
+                if emit:
+                    log.warning("rest_http_error", venue=self.id, url=url,
+                                status=resp.status, reason=err.message,
+                                proxy=self._proxy_log, retry_after=err.retry_after,
+                                body_prefix=snippet, repeats_suppressed=suppressed)
+                raise err
+            body = await resp.read()
             try:
-                return orjson.loads(body)
-            except Exception as exc:  # noqa: BLE001 — surface the real body, not a bare decode error
-                log.warning("rest_json_decode_failed", venue=self.id, url=url,
-                            status=resp.status, content_type=ctype, error=str(exc),
-                            body_prefix=snippet)
-                raise
+                data = orjson.loads(body)
+            except orjson.JSONDecodeError:
+                snippet = body[:200].decode(errors="replace").replace("\n", " ")
+                emit, suppressed = _http_log_throttle.allow((self.id, "non_json"))
+                if emit:
+                    log.warning("rest_non_json_body", venue=self.id, url=url,
+                                status=200, proxy=self._proxy_log,
+                                body_prefix=snippet, repeats_suppressed=suppressed)
+                raise RestError(venue=self.id, url=url, status=200,
+                                message="non-JSON body on 200",
+                                body_prefix=snippet) from None
+            log.debug("rest_ok", venue=self.id, url=url, status=200,
+                      bytes=len(body), proxy=self._proxy_log)
+            return data
 
     async def get_markets(self) -> list[CanonicalSymbol]:
         session = self._require_session()
         await self._limiter.acquire()
         try:
             markets = await self._fetch_markets(session)
-        except Exception:
+        except Exception as exc:
             # Discovery failed on the current REST host (block / non-JSON / timeout).
-            # Rotate to the next host so the collector's retry hits the mirror.
+            # Rotate to the next host so the collector's retry hits the mirror; once a
+            # full host cycle has failed (or the block is definitive), fail over to the
+            # next proxy in the chain — endpoint swaps don't help a blocked egress IP.
+            self._rest_fail_streak += 1
             self._rotate_rest()
+            blocked = isinstance(exc, RestError) and exc.blocked
+            if blocked or self._rest_fail_streak % len(self._rest_urls) == 0:
+                await self._rotate_proxy(
+                    reason=f"http {exc.status}" if isinstance(exc, RestError)
+                    else describe_exc(exc))
             raise
+        self._rest_fail_streak = 0
         for m in markets:
             self._symbol_map[self._raw_symbol(m)] = m
         return markets
@@ -331,8 +433,11 @@ class BaseCexAdapter(ExchangeAdapter):
                                     error=describe_exc(exc))
                         # Fast reconnects to this WS host all failed → rotate to the next
                         # host (mirror) before the slow-retry loop, so a geo/IP-blocked
-                        # primary is escaped instead of retried forever.
+                        # primary is escaped instead of retried forever. With a proxy
+                        # chain configured, also fail over to the next proxy — the
+                        # egress route itself may be what is blocked.
                         self._rotate_ws()
+                        await self._rotate_proxy(reason="ws fast-reconnect exhausted")
                         offline = True
                     await self._sleep(self._config.ws_slow_retry_interval_sec)
                     continue
@@ -446,7 +551,6 @@ class BaseCexAdapter(ExchangeAdapter):
             log.debug("ws_binary_parse_error", venue=self.id, error=describe_exc(exc))
 
     async def _on_ws_text(self, data: str) -> None:
-        import orjson
         try:
             payload = orjson.loads(data)
         except Exception:  # noqa: BLE001 — malformed: drop, keep stream (§2.4)

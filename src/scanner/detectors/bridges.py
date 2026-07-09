@@ -20,17 +20,18 @@ class BridgeRoute:
 
 
 # Conservative default set of well-known canonical bridges between supported networks.
+_R = BridgeRoute
 _DEFAULT_ROUTES: list[BridgeRoute] = [
-    BridgeRoute("Across", "ethereum", "arbitrum", Decimal(2), Decimal("0.0006"), 90, Decimal(2_000_000)),
-    BridgeRoute("Across", "ethereum", "optimism", Decimal(2), Decimal("0.0006"), 90, Decimal(2_000_000)),
-    BridgeRoute("Across", "ethereum", "base", Decimal(2), Decimal("0.0006"), 90, Decimal(2_000_000)),
-    BridgeRoute("Stargate", "ethereum", "polygon", Decimal(3), Decimal("0.0006"), 300, Decimal(1_500_000)),
-    BridgeRoute("Stargate", "ethereum", "bnb", Decimal(3), Decimal("0.0006"), 300, Decimal(1_500_000)),
-    BridgeRoute("Across", "arbitrum", "optimism", Decimal(1), Decimal("0.0005"), 60, Decimal(1_000_000)),
-    BridgeRoute("Across", "arbitrum", "base", Decimal(1), Decimal("0.0005"), 60, Decimal(1_000_000)),
-    BridgeRoute("Stargate", "polygon", "bnb", Decimal(3), Decimal("0.0006"), 300, Decimal(1_000_000)),
-    BridgeRoute("Wormhole", "ethereum", "solana", Decimal(5), Decimal("0.0008"), 900, Decimal(800_000)),
-    BridgeRoute("Wormhole", "bnb", "solana", Decimal(5), Decimal("0.0008"), 900, Decimal(600_000)),
+    _R("Across", "ethereum", "arbitrum", Decimal(2), Decimal("0.0006"), 90, Decimal(2_000_000)),
+    _R("Across", "ethereum", "optimism", Decimal(2), Decimal("0.0006"), 90, Decimal(2_000_000)),
+    _R("Across", "ethereum", "base", Decimal(2), Decimal("0.0006"), 90, Decimal(2_000_000)),
+    _R("Stargate", "ethereum", "polygon", Decimal(3), Decimal("0.0006"), 300, Decimal(1_500_000)),
+    _R("Stargate", "ethereum", "bnb", Decimal(3), Decimal("0.0006"), 300, Decimal(1_500_000)),
+    _R("Across", "arbitrum", "optimism", Decimal(1), Decimal("0.0005"), 60, Decimal(1_000_000)),
+    _R("Across", "arbitrum", "base", Decimal(1), Decimal("0.0005"), 60, Decimal(1_000_000)),
+    _R("Stargate", "polygon", "bnb", Decimal(3), Decimal("0.0006"), 300, Decimal(1_000_000)),
+    _R("Wormhole", "ethereum", "solana", Decimal(5), Decimal("0.0008"), 900, Decimal(800_000)),
+    _R("Wormhole", "bnb", "solana", Decimal(5), Decimal("0.0008"), 900, Decimal(600_000)),
 ]
 
 

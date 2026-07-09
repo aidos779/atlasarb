@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -51,24 +53,44 @@ class UserRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    def _insert(self, table):
+        """Dialect-aware INSERT supporting ON CONFLICT (PostgreSQL and SQLite)."""
+        dialect = self._session.get_bind().dialect.name
+        return pg_insert(table) if dialect == "postgresql" else sqlite_insert(table)
+
     async def get_or_create(self, user_id: int, username: str | None,
                             first_name: str | None) -> UserProfile:
-        row = await self._load(user_id)
-        if row is None:
-            row = User(
-                telegram_user_id=user_id, username=username, first_name=first_name,
-                role=UserRole.VISITOR.value, onboarding_step=0,
+        """Fully idempotent registration (UPSERT).
+
+        Uses ``INSERT ... ON CONFLICT DO NOTHING`` for the user and its child rows, so
+        concurrent /start taps (or a re-run after a partial insert) can never raise a
+        duplicate-key error — the losing insert is a no-op and both callers proceed to
+        read the winning row.
+        """
+        stmt = (
+            self._insert(User)
+            .values(telegram_user_id=user_id, username=username,
+                    first_name=first_name, role=UserRole.VISITOR.value,
+                    onboarding_step=0)
+            .on_conflict_do_nothing(index_elements=["telegram_user_id"])
+        )
+        await self._session.execute(stmt)
+        # Child rows (1:1 subscription / settings / filter) — same idempotent shape;
+        # column defaults supply the initial values.
+        for table in (SubRow, UserSettingsRow, UserFilterRow):
+            child = (
+                self._insert(table)
+                .values(user_id=user_id)
+                .on_conflict_do_nothing(index_elements=["user_id"])
             )
-            row.subscription = SubRow()
-            row.settings = UserSettingsRow()
-            row.user_filter = UserFilterRow()
-            self._session.add(row)
-            await self._session.flush()
-        else:
-            if username and row.username != username:
-                row.username = username
-            if first_name:
-                row.first_name = first_name
+            await self._session.execute(child)
+        row = await self._load(user_id)
+        assert row is not None  # just upserted
+        # Keep the Telegram identity fresh on every touch.
+        if username and row.username != username:
+            row.username = username
+        if first_name and row.first_name != first_name:
+            row.first_name = first_name
         return self._to_domain(row)
 
     async def save_profile(self, profile: UserProfile) -> None:

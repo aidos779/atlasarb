@@ -129,14 +129,17 @@ def favorites_hub(lang: str) -> InlineKeyboardMarkup:
 def notifications_menu(profile: UserProfile, ent: Entitlements, lang: str) -> InlineKeyboardMarkup:
     s = profile.settings
     b = InlineKeyboardBuilder()
-    b.button(text=f"{'🔔' if s.instant_alerts_enabled else '🔕'} {t('notifications.instant', lang)}",
+    instant_icon = '🔔' if s.instant_alerts_enabled else '🔕'
+    b.button(text=f"{instant_icon} {t('notifications.instant', lang)}",
              callback_data="notif:toggle:instant")
     b.button(text=f"{'✅' if s.daily_summary_enabled else '⬜'} {t('notifications.daily', lang)}",
              callback_data="notif:toggle:daily")
     fav_lock = "" if ent.favorite_entity_alerts else " 🔒"
-    b.button(text=f"{'✅' if s.favorite_coin_alerts else '⬜'} {t('notifications.fav_coin', lang)}{fav_lock}",
+    coin_icon = '✅' if s.favorite_coin_alerts else '⬜'
+    b.button(text=f"{coin_icon} {t('notifications.fav_coin', lang)}{fav_lock}",
              callback_data="notif:toggle:fav_coin")
-    b.button(text=f"{'✅' if s.favorite_exchange_alerts else '⬜'} {t('notifications.fav_exchange', lang)}{fav_lock}",
+    exch_icon = '✅' if s.favorite_exchange_alerts else '⬜'
+    b.button(text=f"{exch_icon} {t('notifications.fav_exchange', lang)}{fav_lock}",
              callback_data="notif:toggle:fav_exchange")
     b.button(text=f"🔒 {t('notifications.subscription', lang)}", callback_data="noop")
     b.button(text=f"🔒 {t('notifications.system', lang)}", callback_data="noop")

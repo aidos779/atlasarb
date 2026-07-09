@@ -132,11 +132,12 @@ class Settings(BaseSettings):
     # domains and serve the identical spot REST + WS; all public Binance data uses them.
     binance_rest_url: str = "https://data-api.binance.vision"
     binance_ws_url: str = "wss://data-stream.binance.vision/stream"
-    bybit_rest_url: str = "https://api.bybit.com"
-    bybit_ws_url: str = "wss://stream.bybit.com/v5/public/spot"
-    # Optional per-adapter proxy for Bybit only (its CDN 403-blocks some server IPs on
-    # every host). Empty = direct. Accepts http://, https://, socks5:// (see BybitAdapter).
-    bybit_proxy: str = ""
+    # Optional dedicated proxy chain for Binance (some server IPs get HTTP 451 on every
+    # Binance host). BINANCE_PROXY is the primary; BINANCE_PROXY_FALLBACK is tried when
+    # the primary fails. Empty = direct. Accepts http://, https://, socks4://, socks5://.
+    # Applies to Binance REST + WS only (see BinanceAdapter / BaseCexAdapter proxy chain).
+    binance_proxy: str = ""
+    binance_proxy_fallback: str = ""
     # www.okx.com is geo-blocked from several regions (TCP timeout); the app.okx.com
     # mirror serves the identical v5 public API and stays reachable.
     okx_rest_url: str = "https://app.okx.com"

@@ -1,4 +1,4 @@
-from src.config.logging import configure_logging, describe_exc, get_logger
+from src.config.logging import LogThrottle, configure_logging, describe_exc, get_logger
 from src.config.scanner_config import (
     ArbType,
     ConfigError,
@@ -12,6 +12,7 @@ __all__ = [
     "ArbType",
     "ConfigError",
     "ConfigManager",
+    "LogThrottle",
     "ScannerConfig",
     "Settings",
     "configure_logging",

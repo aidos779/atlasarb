@@ -22,9 +22,14 @@ class BinanceAdapter(BaseCexAdapter):
         # discovery, WS + every reconnect) goes through data-api/data-stream.binance.vision
         # via settings.binance_rest_url / binance_ws_url — api.binance.com and
         # stream.binance.com return HTTP 451 from restricted locations. No fallback to the
-        # blocked hosts.
+        # blocked hosts. When even the Vision hosts are blocked for the server's IP,
+        # BINANCE_PROXY / BINANCE_PROXY_FALLBACK route Binance REST + WS (and the funding
+        # fetch below) through a dedicated proxy chain with automatic failover.
+        proxies = [p for p in (settings.binance_proxy,
+                               settings.binance_proxy_fallback) if p.strip()]
         super().__init__(settings, config, sink, settings.binance_rest_url,
-                         settings.binance_ws_url, rate_per_sec=100, burst=200, **kw)
+                         settings.binance_ws_url, rate_per_sec=100, burst=200,
+                         proxies=proxies, **kw)
 
     def _ping_path(self) -> str:
         return "/api/v3/ping"

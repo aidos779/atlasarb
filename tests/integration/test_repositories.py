@@ -54,3 +54,18 @@ async def test_history_caps_at_50(database):
     async with database.session() as s:
         rows = await HistoryRepository(s).list_interactions(7, "viewed", limit=100)
     assert len(rows) == 50
+
+
+async def test_get_or_create_is_idempotent(database):
+    """UPSERT registration: repeated /start (or concurrent taps) never raises
+    duplicate-key errors and keeps the Telegram identity fresh."""
+    for name in ("alice", "alice", "alice2"):
+        async with database.session() as s:
+            profile = await UserRepository(s).get_or_create(77, name, "Alice")
+    assert profile.telegram_user_id == 77
+    assert profile.username == "alice2"
+    async with database.session() as s:
+        # Child rows exist exactly once and load cleanly.
+        again = await UserRepository(s).get(77)
+    assert again is not None
+    assert again.subscription is not None and again.settings is not None

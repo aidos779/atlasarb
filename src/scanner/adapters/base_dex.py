@@ -7,12 +7,13 @@ verified-token-list gated (§3.4) — the curated pool list is engine *data* inp
 """
 from __future__ import annotations
 
+import time
 from abc import abstractmethod
 from decimal import Decimal
 
 import aiohttp
 
-from src.config import describe_exc, get_logger
+from src.config import LogThrottle, describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
 from src.config.settings import Settings
 from src.domain.enums import ExchangeStatus, VenueType
@@ -23,6 +24,10 @@ from src.scanner.adapters.rpc_pool import RpcErrorKind, RpcProviderPool
 from src.scanner.adapters.tls import ssl_context
 
 log = get_logger("adapter.dex")
+
+# All-providers-down is worth one aggregated WARNING per network per window, not one
+# per call — a fully rate-limited host would otherwise emit it every poll cycle.
+_exhausted_log_throttle = LogThrottle(interval_sec=60.0)
 
 
 class _RpcFailure(Exception):
@@ -139,6 +144,7 @@ class BaseDexAdapter(ExchangeAdapter):
         last_err: str | None = None
         for url in order:
             await self._limiter.acquire()
+            started = time.perf_counter()
             try:
                 async with self._session.post(url, json=payload) as resp:
                     if resp.status != 200:
@@ -158,7 +164,8 @@ class BaseDexAdapter(ExchangeAdapter):
                         # Treat as a provider failure and fail over instead of returning
                         # None (which would look like an outage to the caller).
                         raise _RpcFailure(RpcErrorKind.RPC_ERROR, "null result")
-                    self._rpc_pool.record_success(url)
+                    self._rpc_pool.record_success(
+                        url, latency_ms=(time.perf_counter() - started) * 1000)
                     return result
             except _RpcFailure as exc:
                 self._rpc_pool.record_failure(url, exc.kind)
@@ -175,12 +182,19 @@ class BaseDexAdapter(ExchangeAdapter):
                 last_err = describe_exc(exc)
                 log.debug("rpc_failover", network=self.network, url=url,
                           kind=RpcErrorKind.HTTP.value, error=last_err)
-        # Every provider tried this call failed — log at WARNING with the full per-provider
-        # health snapshot so production shows exactly which endpoints are down and why,
-        # instead of a mute None that only surfaces later as "API Offline".
-        log.warning("rpc_all_providers_failed", venue=getattr(self, "id", None),
-                    network=self.network, method=method, providers=len(order),
-                    error=last_err, health=self._rpc_pool.snapshot())
+        # Every provider tried this call failed — log at WARNING (throttled per network)
+        # with the full per-provider health snapshot so production shows exactly which
+        # endpoints are down and why, instead of a mute None that only surfaces later
+        # as "API Offline".
+        emit, suppressed = _exhausted_log_throttle.allow(self.network)
+        if emit:
+            log.warning("rpc_all_providers_failed", venue=getattr(self, "id", None),
+                        network=self.network, method=method, providers=len(order),
+                        error=last_err, health=self._rpc_pool.snapshot(),
+                        repeats_suppressed=suppressed)
+        else:
+            log.debug("rpc_all_providers_failed", network=self.network,
+                      method=method, error=last_err)
         return None
 
     async def eth_call(self, to: str, data: str) -> str | None:

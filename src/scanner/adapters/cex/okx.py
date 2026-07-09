@@ -30,9 +30,9 @@ class OkxAdapter(BaseCexAdapter):
         return f"{base}-{quote}"
 
     async def _fetch_markets(self, session: aiohttp.ClientSession) -> list[CanonicalSymbol]:
-        async with session.get(f"{self._rest_url}/api/v5/public/instruments",
-                               params={"instType": "SPOT"}) as resp:
-            data = await resp.json()
+        data = await self._get_json_logged(
+            session, f"{self._rest_url}/api/v5/public/instruments",
+            params={"instType": "SPOT"})
         out = []
         for s in data.get("data", []):
             if s.get("state") != "live":

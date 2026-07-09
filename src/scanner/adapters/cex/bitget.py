@@ -26,8 +26,8 @@ class BitgetAdapter(BaseCexAdapter):
         return f"{symbol.base_asset}{symbol.quote_asset}"
 
     async def _fetch_markets(self, session: aiohttp.ClientSession) -> list[CanonicalSymbol]:
-        async with session.get(f"{self._rest_url}/api/v2/spot/public/symbols") as resp:
-            data = await resp.json()
+        data = await self._get_json_logged(
+            session, f"{self._rest_url}/api/v2/spot/public/symbols")
         out = []
         for s in data.get("data", []):
             if s.get("status") != "online":

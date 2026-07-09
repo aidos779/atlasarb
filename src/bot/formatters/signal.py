@@ -70,11 +70,12 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
     bd = signal.profit_breakdown
     if bd is not None:
         net_usd = await format_money(fx, bd.net_profit_usd, cur)
+        network_fees = bd.withdrawal_fees_usd + bd.gas_fees_usd + bd.bridge_fees_usd
         parts.append(
             "<b>Profit Breakdown</b>\n"
             f"Gross Spread: {format_pct(bd.gross_spread_pct)}\n"
             f"Trading fees: −{await format_money(fx, bd.trading_fees_usd, cur)}\n"
-            f"Withdrawal/network: −{await format_money(fx, bd.withdrawal_fees_usd + bd.gas_fees_usd + bd.bridge_fees_usd, cur)}\n"
+            f"Withdrawal/network: −{await format_money(fx, network_fees, cur)}\n"
             f"Est. slippage: −{await format_money(fx, bd.slippage_cost_usd, cur)}\n"
             f"<b>Net Profit: {format_pct(bd.net_profit_pct)} (~{net_usd})</b>"
         )

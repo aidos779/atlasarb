@@ -33,8 +33,7 @@ class MexcAdapter(BaseCexAdapter):
         return f"{symbol.base_asset}{symbol.quote_asset}"
 
     async def _fetch_markets(self, session: aiohttp.ClientSession) -> list[CanonicalSymbol]:
-        async with session.get(f"{self._rest_url}/api/v3/exchangeInfo") as resp:
-            data = await resp.json()
+        data = await self._get_json_logged(session, f"{self._rest_url}/api/v3/exchangeInfo")
         out = []
         for s in data.get("symbols", []):
             status = s.get("status")

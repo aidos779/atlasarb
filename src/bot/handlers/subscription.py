@@ -36,7 +36,8 @@ async def _show_subscription(event, ctx: BotContext, profile: UserProfile) -> No
     if profile.subscription.period_end:
         lines.append("Renews/expires: "
                      + format_datetime(profile.subscription.period_end, profile.settings.timezone))
-    lines.append(f"Signals/refresh: {'∞' if ent.signals_per_refresh < 0 else ent.signals_per_refresh}")
+    per_refresh = '∞' if ent.signals_per_refresh < 0 else ent.signals_per_refresh
+    lines.append(f"Signals/refresh: {per_refresh}")
     kb = subscription_menu(profile, lang)
     text = "\n".join(lines)
     if isinstance(event, CallbackQuery):
