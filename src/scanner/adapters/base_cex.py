@@ -39,13 +39,21 @@ class BaseCexAdapter(ExchangeAdapter):
         self, settings: Settings, config: ScannerConfig, sink: MarketDataSink,
         rest_url: str, ws_url: str, rate_per_sec: float, burst: float,
         on_success=None, on_failure=None, withdrawal_fees: WithdrawalFeeProvider | None = None,
+        rest_fallbacks: list[str] | None = None, ws_fallbacks: list[str] | None = None,
     ) -> None:
         self._settings = settings
         self._withdrawal_fees = withdrawal_fees or WithdrawalFeeProvider()
         self._config = config
         self._sink = sink
-        self._rest_url = rest_url.rstrip("/")
-        self._ws_url = ws_url
+        # REST/WS host chains: primary first, then venue-provided mirror hosts. Single-host
+        # venues pass no fallbacks, so rotation is a no-op for them (behaviour unchanged).
+        # Rotation is what recovers a venue whose primary host is geo/IP-blocked (Binance
+        # data-api.binance.vision, Bybit api.bytick.com) — the "Online then API Offline"
+        # case where the primary connects then delivers nothing / returns an HTML block.
+        self._rest_urls = [rest_url.rstrip("/")] + [u.rstrip("/") for u in (rest_fallbacks or [])]
+        self._ws_urls = [ws_url] + list(ws_fallbacks or [])
+        self._rest_idx = 0
+        self._ws_idx = 0
         self._limiter = TokenBucket(rate_per_sec, burst)
         self._session: aiohttp.ClientSession | None = None
         # WS is sharded across several connections: every venue caps subscriptions
@@ -65,6 +73,25 @@ class BaseCexAdapter(ExchangeAdapter):
         self._on_success = on_success or (lambda latency=0.0, stream=False: None)
         self._on_failure = on_failure or (lambda hard=False: None)
         self._taker_fee = Decimal("0.001")   # 0.10% MVP default (§8.3)
+
+    # ── active REST/WS host (rotates across primary + mirror hosts on failure) ──
+    @property
+    def _rest_url(self) -> str:
+        return self._rest_urls[self._rest_idx % len(self._rest_urls)]
+
+    @property
+    def _ws_url(self) -> str:
+        return self._ws_urls[self._ws_idx % len(self._ws_urls)]
+
+    def _rotate_rest(self) -> None:
+        if len(self._rest_urls) > 1:
+            self._rest_idx += 1
+            log.warning("rest_host_failover", venue=self.id, active=self._rest_url)
+
+    def _rotate_ws(self) -> None:
+        if len(self._ws_urls) > 1:
+            self._ws_idx += 1
+            log.warning("ws_host_failover", venue=self.id, active=self._ws_url)
 
     # ── venue-specific hooks ──
     @abstractmethod
@@ -113,10 +140,48 @@ class BaseCexAdapter(ExchangeAdapter):
             await self._session.close()
         self._status = ExchangeStatus.UNKNOWN
 
+    async def _get_json_logged(self, session: aiohttp.ClientSession, url: str,
+                               params: dict | None = None) -> object:
+        """GET + parse JSON, logging the raw HTTP status/headers/body BEFORE parsing.
+
+        Discovery failures (e.g. Bybit's JSONDecodeError) happen when a venue returns a
+        non-JSON body — an HTML/CDN block or rate-limit page. Reading the body first turns
+        that opaque crash into an explicit diagnostic (status + body prefix) that
+        distinguishes a code bug from a geo/IP/rate-limit block. Raises on non-JSON so the
+        caller's retry/health path still triggers.
+        """
+        async with session.get(url, params=params) as resp:
+            body = await resp.text()
+            ctype = resp.headers.get("Content-Type", "")
+            snippet = body[:300].replace("\n", " ")
+            if resp.status != 200 or "json" not in ctype.lower():
+                log.warning("rest_non_json_response", venue=self.id, url=url,
+                            status=resp.status, content_type=ctype,
+                            retry_after=resp.headers.get("Retry-After"),
+                            cf_ray=resp.headers.get("cf-ray"),
+                            server=resp.headers.get("Server"), body_prefix=snippet)
+            else:
+                log.debug("rest_ok", venue=self.id, url=url, status=resp.status,
+                          bytes=len(body))
+            import orjson
+            try:
+                return orjson.loads(body)
+            except Exception as exc:  # noqa: BLE001 — surface the real body, not a bare decode error
+                log.warning("rest_json_decode_failed", venue=self.id, url=url,
+                            status=resp.status, content_type=ctype, error=str(exc),
+                            body_prefix=snippet)
+                raise
+
     async def get_markets(self) -> list[CanonicalSymbol]:
         session = self._require_session()
         await self._limiter.acquire()
-        markets = await self._fetch_markets(session)
+        try:
+            markets = await self._fetch_markets(session)
+        except Exception:
+            # Discovery failed on the current REST host (block / non-JSON / timeout).
+            # Rotate to the next host so the collector's retry hits the mirror.
+            self._rotate_rest()
+            raise
         for m in markets:
             self._symbol_map[self._raw_symbol(m)] = m
         return markets
@@ -254,6 +319,10 @@ class BaseCexAdapter(ExchangeAdapter):
                             self._on_failure(hard=True)
                         log.warning("ws_offline_slow_retry", venue=self.id, shard=idx,
                                     error=describe_exc(exc))
+                        # Fast reconnects to this WS host all failed → rotate to the next
+                        # host (mirror) before the slow-retry loop, so a geo/IP-blocked
+                        # primary is escaped instead of retried forever.
+                        self._rotate_ws()
                         offline = True
                     await self._sleep(self._config.ws_slow_retry_interval_sec)
                     continue
@@ -271,6 +340,7 @@ class BaseCexAdapter(ExchangeAdapter):
         loop = asyncio.get_event_loop()
         async with session.ws_connect(self._ws_url, autoping=True, heartbeat=None) as ws:
             self._shard_ws[idx] = ws
+            log.info("ws_connected", venue=self.id, shard=idx, url=self._ws_url)
             try:
                 symbols = [self._symbol_map.get(self._raw_symbol_from_pair(p))
                            for p in list(self._shards[idx])]
@@ -279,6 +349,12 @@ class BaseCexAdapter(ExchangeAdapter):
                     await ws.send_json(frame)
                 await self._ws_receive_loop(ws, loop, idx)
             finally:
+                # Close code/reason names WHY a socket dropped (1006 abnormal, 1008 policy,
+                # 4004 auth, ServerTimeout, etc.) — the exact info needed to tell a code
+                # bug from a server/network close.
+                log.info("ws_closed", venue=self.id, shard=idx,
+                         close_code=ws.close_code,
+                         exc=describe_exc(ws.exception()) if ws.exception() else None)
                 self._shard_ws[idx] = None
 
     def _heartbeat_frame(self) -> dict | str | None:

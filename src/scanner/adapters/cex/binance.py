@@ -18,8 +18,14 @@ class BinanceAdapter(BaseCexAdapter):
     ws_max_conns = 3
 
     def __init__(self, settings, config, sink, **kw) -> None:
+        # data-api/data-stream.binance.vision is Binance's public market-data mirror; it
+        # is reachable from many regions/cloud IPs where api/stream.binance.com is blocked
+        # or returns no data (the "Online then API Offline after ~1 min" case). Used only
+        # as failover after the configured primary host fails.
         super().__init__(settings, config, sink, settings.binance_rest_url,
-                         settings.binance_ws_url, rate_per_sec=100, burst=200, **kw)
+                         settings.binance_ws_url, rate_per_sec=100, burst=200,
+                         rest_fallbacks=["https://data-api.binance.vision"],
+                         ws_fallbacks=["wss://data-stream.binance.vision/stream"], **kw)
 
     def _ping_path(self) -> str:
         return "/api/v3/ping"
@@ -28,8 +34,7 @@ class BinanceAdapter(BaseCexAdapter):
         return f"{symbol.base_asset}{symbol.quote_asset}"
 
     async def _fetch_markets(self, session: aiohttp.ClientSession) -> list[CanonicalSymbol]:
-        async with session.get(f"{self._rest_url}/api/v3/exchangeInfo") as resp:
-            data = await resp.json()
+        data = await self._get_json_logged(session, f"{self._rest_url}/api/v3/exchangeInfo")
         out: list[CanonicalSymbol] = []
         for s in data.get("symbols", []):
             if s.get("status") != "TRADING" or not s.get("isSpotTradingAllowed"):

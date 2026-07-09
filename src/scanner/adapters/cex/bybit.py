@@ -16,8 +16,13 @@ class BybitAdapter(BaseCexAdapter):
     ws_max_conns = 3
 
     def __init__(self, settings, config, sink, **kw) -> None:
+        # api/stream.bytick.com is Bybit's identical alternate host; it stays reachable
+        # from regions where api.bybit.com is geo-blocked (there it returns an HTML block
+        # page → the JSONDecodeError seen during discovery). Failover only.
         super().__init__(settings, config, sink, settings.bybit_rest_url,
-                         settings.bybit_ws_url, rate_per_sec=20, burst=40, **kw)
+                         settings.bybit_ws_url, rate_per_sec=20, burst=40,
+                         rest_fallbacks=["https://api.bytick.com"],
+                         ws_fallbacks=["wss://stream.bytick.com/v5/public/spot"], **kw)
         self._last_book: dict[str, tuple[list, list]] = {}
 
     def _ping_path(self) -> str:
@@ -27,9 +32,9 @@ class BybitAdapter(BaseCexAdapter):
         return f"{symbol.base_asset}{symbol.quote_asset}"
 
     async def _fetch_markets(self, session: aiohttp.ClientSession) -> list[CanonicalSymbol]:
-        async with session.get(f"{self._rest_url}/v5/market/instruments-info",
-                               params={"category": "spot"}) as resp:
-            data = await resp.json()
+        data = await self._get_json_logged(
+            session, f"{self._rest_url}/v5/market/instruments-info",
+            params={"category": "spot"})
         out = []
         for s in data.get("result", {}).get("list", []):
             if s.get("status") != "Trading":
