@@ -30,6 +30,10 @@ class EngineBridge:
         self._registry.upsert(signal)
         try:
             self._queue.put_nowait((event, signal))
+            log.info("notification_queued", signal_id=signal.id, admit_event=event,
+                     arb_type=signal.arb_type.value, coin=signal.coin,
+                     net_profit_pct=float(round(signal.net_profit_pct, 4)),
+                     queue_pending=self._queue.qsize())
         except asyncio.QueueFull:
             log.warning("notification_queue_full", signal_id=signal.id)
 

@@ -32,21 +32,39 @@ class DexPoolCollector:
         self._config = config
 
     async def poll_once(self) -> None:
-        for venue, adapter in self._adapters.items():
+        # Poll every DEX venue concurrently. Serially, one slow/rate-limited network
+        # (Ethereum public RPC especially) delayed every venue behind it, pushing pool
+        # data past the DEX staleness window (stale_dex_rpc_sec) and flapping those
+        # venues to Maintenance even though they were reachable.
+        await asyncio.gather(
+            *(self._poll_venue(v, a) for v, a in self._adapters.items()),
+            return_exceptions=True,
+        )
+
+    async def _poll_venue(self, venue: str, adapter: ExchangeAdapter) -> None:
+        try:
+            markets = await adapter.get_markets()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("dex_market_poll_failed", venue=venue, error=describe_exc(exc))
+            return
+        for sym in markets:
+            if not self._cache.is_tracked(venue, sym.pair):
+                self._cache.track(venue, sym)
+
+        # Read this venue's pools concurrently. The adapter's token bucket bounds the
+        # real RPC rate; gather only overlaps round-trip latency so a full cycle stays
+        # well inside the staleness window.
+        async def _read(sym):
             try:
-                markets = await adapter.get_markets()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("dex_market_poll_failed", venue=venue, error=describe_exc(exc))
-                continue
-            for sym in markets:
-                if not self._cache.is_tracked(venue, sym.pair):
-                    self._cache.track(venue, sym)
-                try:
-                    book = await adapter.get_pool_state(sym)
-                except Exception:  # noqa: BLE001
-                    continue
-                if book is not None:
-                    self._cache.upsert_book(book)
+                return await adapter.get_pool_state(sym)
+            except Exception:  # noqa: BLE001
+                return None
+
+        books = await asyncio.gather(*(_read(s) for s in markets),
+                                     return_exceptions=True)
+        for book in books:
+            if book is not None and not isinstance(book, Exception):
+                self._cache.upsert_book(book)
 
     def start(self) -> None:
         self._stop.clear()

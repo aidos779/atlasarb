@@ -10,6 +10,7 @@ Jupiter's reported routed liquidity (documented approximation for aggregator dep
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from decimal import Decimal
 
@@ -17,6 +18,7 @@ from src.config import describe_exc, get_logger
 from src.domain.enums import ExchangeStatus, VenueType
 from src.domain.market import CanonicalSymbol, OrderBook
 from src.scanner.adapters.base_dex import BaseDexAdapter
+
 log = get_logger("adapter.dex")
 
 # Solana-native verified symbols only. EVM-origin symbols (SHIB/PEPE/ETH/BTC…) are
@@ -52,6 +54,7 @@ class JupiterAdapter(BaseDexAdapter):
         self._taker_fee = Decimal("0.001")
         self._prices: dict[str, dict] = {}                      # mint -> price/v3 row
         self._prices_at = 0.0
+        self._price_lock = asyncio.Lock()                       # collapse concurrent refreshes
 
     # ── discovery (verified catalog ∩ §3.4 allowlist) ──
     async def _maybe_discover(self) -> None:
@@ -91,21 +94,28 @@ class JupiterAdapter(BaseDexAdapter):
 
     # ── batched pricing ──
     async def _refresh_prices(self) -> None:
-        now = time.time()
-        if now - self._prices_at < _PRICE_TTL_SEC or self._session is None:
+        if time.time() - self._prices_at < _PRICE_TTL_SEC or self._session is None:
             return
-        ids = list(self._mints.values()) + [_USDC_MINT, _USDT_MINT]
-        await self._limiter.acquire()
-        async with self._session.get(
-            f"{self._api_root}/price/v3", params={"ids": ",".join(ids)}
-        ) as resp:
-            if resp.status != 200:
-                raise ConnectionError(f"jupiter price {resp.status}")
-            data = await resp.json()
-        if not isinstance(data, dict) or not data:
-            raise ValueError("jupiter price payload empty")
-        self._prices = data
-        self._prices_at = now
+        # Single-flight: pool reads are now issued concurrently (one per tracked
+        # symbol), so without this lock every read past the TTL fired its own
+        # price/v3 request at once — a thundering herd that tripped Jupiter's
+        # free-tier rate limit (429) and flapped the venue to API Offline. The lock
+        # collapses the burst into one batch call; the rest use the fresh cache.
+        async with self._price_lock:
+            if time.time() - self._prices_at < _PRICE_TTL_SEC:
+                return  # another coroutine already refreshed while we waited
+            ids = list(self._mints.values()) + [_USDC_MINT, _USDT_MINT]
+            await self._limiter.acquire()
+            async with self._session.get(
+                f"{self._api_root}/price/v3", params={"ids": ",".join(ids)}
+            ) as resp:
+                if resp.status != 200:
+                    raise ConnectionError(f"jupiter price {resp.status}")
+                data = await resp.json()
+            if not isinstance(data, dict) or not data:
+                raise ValueError("jupiter price payload empty")
+            self._prices = data
+            self._prices_at = time.time()
 
     async def health_check(self) -> bool:
         if self._session is None:

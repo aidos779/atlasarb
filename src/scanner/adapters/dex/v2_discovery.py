@@ -8,6 +8,7 @@ data, not code.
 """
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 from src.config import get_logger
@@ -29,25 +30,32 @@ async def discover_v2_pools(adapter, network: str, factory: str,
     Returns [] on total RPC failure so callers can keep their previous set."""
     bases: list[TokenDef] = BASE_TOKENS.get(network, [])
     quotes: list[TokenDef] = QUOTE_TOKENS.get(network, [])
+    # Concurrent getPair() probes (see v3_discovery for the rationale): serial round-trips
+    # over a rate-limited public RPC were a source of DEX staleness/Maintenance flaps. The
+    # token bucket still bounds the real request rate.
+    combos = [(b, q) for b in bases for q in quotes]
+    results = await asyncio.gather(
+        *(adapter.eth_call(factory, _GET_PAIR_SELECTOR + _addr_word(b.address)
+                           + _addr_word(q.address))
+          for (b, q) in combos),
+        return_exceptions=True,
+    )
     pools: list[PoolDef] = []
     failures = 0
-    for base in bases:
-        for quote in quotes:
-            data = _GET_PAIR_SELECTOR + _addr_word(base.address) + _addr_word(quote.address)
-            result = await adapter.eth_call(factory, data)
-            if result is None:
-                failures += 1
-                continue
-            if result == _ZERO or int(result, 16) == 0:
-                continue  # factory has no pool for this combination
-            pool_address = "0x" + result[-40:]
-            pools.append(PoolDef(
-                base_asset=base.symbol, quote_asset=quote.symbol,
-                pool_address=pool_address,
-                token0_is_base=base.address.lower() < quote.address.lower(),
-                base_decimals=base.decimals, quote_decimals=quote.decimals,
-                fee_tier=fee_tier,
-            ))
+    for (base, quote), result in zip(combos, results, strict=True):
+        if isinstance(result, Exception) or result is None:
+            failures += 1
+            continue
+        if result == _ZERO or int(result, 16) == 0:
+            continue  # factory has no pool for this combination
+        pool_address = "0x" + result[-40:]
+        pools.append(PoolDef(
+            base_asset=base.symbol, quote_asset=quote.symbol,
+            pool_address=pool_address,
+            token0_is_base=base.address.lower() < quote.address.lower(),
+            base_decimals=base.decimals, quote_decimals=quote.decimals,
+            fee_tier=fee_tier,
+        ))
     if failures and not pools:
         return []
     return pools

@@ -129,8 +129,14 @@ class HealthRegistry:
         h = self._venues[venue]
         if h.last_ws_data_at == 0:
             return
-        if (now or time.time()) - h.last_ws_data_at > threshold_sec:
+        age = (now or time.time()) - h.last_ws_data_at
+        if age > threshold_sec:
             if h.status == ExchangeStatus.ONLINE:
+                # Log the exact age vs threshold so a Maintenance flap is explained by a
+                # real staleness number (which venue went quiet, for how long) rather
+                # than guesswork.
+                log.info("venue_stale", venue=venue,
+                         data_age_sec=round(age, 1), threshold_sec=threshold_sec)
                 self._transition(venue, ExchangeStatus.MAINTENANCE)
 
     def _transition(self, venue: str, new: ExchangeStatus) -> None:

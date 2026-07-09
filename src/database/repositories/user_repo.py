@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.config import get_logger
 from src.database.models import Subscription as SubRow
 from src.database.models import User, UserFilterRow, UserSettingsRow
 from src.domain.enums import (
@@ -26,6 +27,8 @@ from src.domain.user import (
     UserProfile,
     UserSettings,
 )
+
+log = get_logger("repo.user")
 
 
 class UserRepository:
@@ -138,7 +141,18 @@ class UserRepository:
             )
         )
         rows = (await self._session.execute(stmt)).scalars()
-        return [self._to_domain(r) for r in rows]
+        # Map defensively: a single row with a value that fails enum coercion (a role /
+        # tier / status / language written by an older schema or edited by hand) must
+        # NOT abort the whole candidate list — that silently dropped instant alerts for
+        # every user. Skip the offending row and log it instead.
+        out: list[UserProfile] = []
+        for r in rows:
+            try:
+                out.append(self._to_domain(r))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("user_row_skipped", user_id=getattr(r, "telegram_user_id", None),
+                            role=getattr(r, "role", None), error=str(exc))
+        return out
 
     async def due_renewals(self, before_ts: float) -> list[int]:
         from datetime import datetime
