@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from decimal import Decimal
 
 from src.config import LogThrottle, describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
@@ -137,6 +138,9 @@ class ScanningEngine:
     def update_config(self, config: ScannerConfig) -> None:
         """Hot-reload propagation (§20.4)."""
         self._config = config
+        # Drop the cached detection context so config-derived values (e.g. the
+        # CEX↔CEX plausibility ceiling) are rebuilt from the new config on next use.
+        self._ctx = None
         for comp in (self._cache, self._cooldown, self._lifecycle, self._assembler,
                      self._priority, self._market_collector, self._dex_collector,
                      self._reconciliation, self._health):
@@ -226,6 +230,8 @@ class ScanningEngine:
             ctx = DetectionContext(
                 cache=self._cache, health=self._health, venues=self._venue_info,
                 verified_tokens=self._verified_tokens,
+                max_plausible_cex_spread_pct=Decimal(
+                    str(self._config.max_plausible_cex_spread_pct)),
             )
             self._ctx = ctx
         return ctx

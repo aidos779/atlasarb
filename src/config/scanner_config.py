@@ -65,6 +65,13 @@ class ScannerConfig:
     min_tradeable_size_usd: float = 100.0      # §10 liquidity gate
     max_sane_spread_pct: float = 20.0          # §4.5 invalid-price ceiling
     implausible_spread_pct: float = 1000.0     # §15.5 last-resort validator ceiling
+    # CEX↔CEX price-spread plausibility ceiling (§4.5). Real same-asset spot spreads
+    # between exchanges sit well under a few percent; a double-digit "spread" is almost
+    # always a ticker collision (same symbol, DIFFERENT underlying token per venue — e.g.
+    # AI on Binance vs a different AI on OKX) or a stale/bad tick, not a tradeable arb.
+    # Candidates above this are dropped in the detector, BEFORE the profit pipeline.
+    # Does not apply to funding/cross-chain (their "spread" is a projected carry).
+    max_plausible_cex_spread_pct: float = 10.0
     stablecoin_crossquote_bps: float = 3.0     # §8.9 default conversion cost
 
     # ── Bridge / cross-chain (§7.5) ──

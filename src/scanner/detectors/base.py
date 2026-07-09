@@ -30,6 +30,9 @@ class DetectionContext:
     health: HealthRegistry
     venues: dict[str, VenueInfo] = field(default_factory=dict)
     verified_tokens: set[str] = field(default_factory=set)  # §3.4 (base assets)
+    # Price-spread plausibility ceiling for CEX↔CEX (ticker-collision / bad-tick guard).
+    # 0 disables the guard. Set from ScannerConfig.max_plausible_cex_spread_pct.
+    max_plausible_cex_spread_pct: Decimal = Decimal(10)
 
     def online_cex_prices(self, pair: str) -> list[tuple[str, object]]:
         out = []
