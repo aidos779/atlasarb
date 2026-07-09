@@ -116,6 +116,7 @@ class BaseDexAdapter(ExchangeAdapter):
         if not self._rpc_urls or self._session is None:
             return None
         attempts = len(self._rpc_urls)
+        last_err: str | None = None
         for _ in range(attempts):
             url = self._rpc_urls[self._rpc_idx % len(self._rpc_urls)]
             await self._limiter.acquire()
@@ -124,14 +125,29 @@ class BaseDexAdapter(ExchangeAdapter):
                     url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
                 ) as resp:
                     if resp.status != 200:
-                        raise ConnectionError(f"rpc {resp.status}")
-                    data = await resp.json()
+                        # 429/403 here is the usual production failure: the host's IP is
+                        # rate-limited/blocked by that public RPC. Carry the status so the
+                        # exhaustion log below names the real cause (not a generic None).
+                        raise ConnectionError(f"http {resp.status}")
+                    data = await resp.json(content_type=None)
                     if "error" in data:
                         raise ValueError(str(data["error"]))
-                    return data.get("result")
+                    result = data.get("result")
+                    if result is None:
+                        # Some public nodes answer 200 with a null result when degraded.
+                        # Treat as a provider failure and fail over instead of returning
+                        # None (which would short-circuit the chain and look like an outage).
+                        raise ValueError("null result")
+                    return result
             except Exception as exc:  # noqa: BLE001 — failover to next provider
-                log.debug("rpc_failover", network=self.network, url=url, error=describe_exc(exc))
+                last_err = describe_exc(exc)
+                log.debug("rpc_failover", network=self.network, url=url, error=last_err)
                 self._rpc_idx += 1
+        # Every provider failed — this is what silently offlines the Ethereum DEX venues.
+        # Log it at WARNING so production shows exactly which network/method/cause failed
+        # instead of a mute None that only surfaces later as "API Offline".
+        log.warning("rpc_all_providers_failed", venue=getattr(self, "id", None),
+                    network=self.network, method=method, providers=attempts, error=last_err)
         return None
 
     async def eth_call(self, to: str, data: str) -> str | None:

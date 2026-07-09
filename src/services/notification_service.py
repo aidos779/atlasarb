@@ -111,6 +111,8 @@ class NotificationService:
         eligible = [p for p in candidates
                     if entitlements_for(p.effective_tier).signal_delay_sec == delay]
         log.info("dispatch_pass", signal_id=signal.id, delay=delay,
+                 arb_type=signal.arb_type.value, coin=signal.coin,
+                 net_profit_pct=float(round(signal.net_profit_pct, 4)),
                  candidates=len(candidates), eligible_this_pass=len(eligible))
         sent = 0
         for profile in eligible:
@@ -120,7 +122,9 @@ class NotificationService:
             except Exception as exc:  # noqa: BLE001
                 log.warning("user_eval_error", user_id=profile.telegram_user_id,
                             signal_id=signal.id, error=str(exc), exc_info=True)
-        log.info("dispatch_pass_done", signal_id=signal.id, delay=delay, delivered=sent)
+        log.info("dispatch_pass_done", signal_id=signal.id, delay=delay,
+                 arb_type=signal.arb_type.value,
+                 net_profit_pct=float(round(signal.net_profit_pct, 4)), delivered=sent)
 
     async def _evaluate_user(self, profile: UserProfile, signal: Signal) -> bool:
         """Return True iff an alert was actually delivered to this user."""
@@ -152,7 +156,7 @@ class NotificationService:
                 and profile.filter.matches(signal)
             )
             if not (passes_filter or fav_trigger):
-                log.debug("alert_filtered", user_id=uid, signal_id=signal.id,
+                log.info("alert_dropped_filter", user_id=uid, signal_id=signal.id,
                           instant_alerts=settings.instant_alerts_enabled,
                           arb_allowed=ent.arb_type_allowed(signal.arb_type),
                           filter_match=profile.filter.matches(signal),
@@ -163,13 +167,13 @@ class NotificationService:
             # Low-confidence gate (R-SCHEMA-2) — never for a below-threshold signal.
             threshold = self._config_provider().confidence_threshold
             if signal.confidence_score < threshold:
-                log.debug("alert_low_confidence", user_id=uid, signal_id=signal.id,
+                log.info("alert_dropped_confidence", user_id=uid, signal_id=signal.id,
                           confidence=signal.confidence_score, threshold=threshold)
                 return False
 
             # Mute (§13.5).
             if await notif_repo.is_muted(uid, signal.trading_pair, datetime.now(UTC)):
-                log.debug("alert_muted", user_id=uid, signal_id=signal.id)
+                log.info("alert_dropped_muted", user_id=uid, signal_id=signal.id)
                 return False
 
             # Per-user cooldown + significant-change override (§18).
@@ -178,7 +182,7 @@ class NotificationService:
             if cooldown and cooldown.until.replace(tzinfo=UTC) > datetime.now(UTC):
                 delta = abs(signal.net_profit_pct - Decimal(str(cooldown.last_net_pct)))
                 if delta < _PROFIT_OVERRIDE_PP:
-                    log.debug("alert_cooldown", user_id=uid, signal_id=signal.id)
+                    log.info("alert_dropped_cooldown", user_id=uid, signal_id=signal.id)
                     return False  # still cooling down, not a significant change
 
             # Hourly cap with throttle notice (§13.3 / R-NOTIF-1).
@@ -193,7 +197,7 @@ class NotificationService:
                             "were found. Upgrade to Pro for unlimited alerts.")
                         await notif_repo.log(uid, "throttle_notice",
                                              "Hourly alert limit reached")
-                    log.debug("alert_hourly_capped", user_id=uid, signal_id=signal.id)
+                    log.info("alert_dropped_hourly_cap", user_id=uid, signal_id=signal.id)
                     return False
 
             ok = await self._notifier.send_alert(uid, signal, settings.language.value)

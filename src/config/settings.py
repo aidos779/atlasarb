@@ -11,7 +11,11 @@ from typing import Any
 from pydantic import Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic_settings.sources import DotEnvSettingsSource, EnvSettingsSource, PydanticBaseSettingsSource
+from pydantic_settings.sources import (
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+)
 
 # Fields that accept comma-separated env values instead of JSON arrays.
 _CSV_FIELDS = frozenset(
@@ -27,6 +31,35 @@ _CSV_FIELDS = frozenset(
         "solana_rpc_urls",
     }
 )
+
+
+# Extra independent public RPC providers appended after the configured ones as failover
+# targets (see Settings.rpc_urls_for). Keyed by network; Ethereum is the one whose public
+# endpoints most often rate-limit a shared/cloud IP, offlining the Uniswap/Sushi venues.
+_EXTRA_FALLBACK_RPCS: dict[str, tuple[str, ...]] = {
+    # Ethereum endpoints below were each verified to return a real eth_blockNumber from a
+    # clean network; flaky ones (that 200 with a null result or serve HTML) were dropped
+    # because they would poison the failover chain.
+    "ethereum": (
+        "https://ethereum.publicnode.com",
+        "https://eth.merkle.io",
+        "https://rpc.mevblocker.io",
+        "https://eth-mainnet.public.blastapi.io",
+        "https://eth.rpc.blxrbdn.com",
+        "https://eth.api.onfinality.io/public",
+        "https://rpc.flashbots.net",
+    ),
+    "bnb": (
+        "https://bsc.publicnode.com",
+        "https://bsc-dataseed1.defibit.io",
+        "https://bsc-dataseed1.ninicoin.io",
+    ),
+    "arbitrum": ("https://arbitrum-one.publicnode.com", "https://arbitrum.meowrpc.com"),
+    "optimism": ("https://optimism.publicnode.com", "https://optimism.meowrpc.com"),
+    "base": ("https://base.publicnode.com", "https://base.meowrpc.com"),
+    "polygon": ("https://polygon-bor.publicnode.com", "https://polygon.meowrpc.com"),
+    "solana": ("https://solana-rpc.publicnode.com",),
+}
 
 
 def _split_csv(value: str | list[str] | None) -> list[str]:
@@ -168,7 +201,16 @@ class Settings(BaseSettings):
             "polygon": self.polygon_rpc_urls,
             "solana": self.solana_rpc_urls,
         }
-        return mapping.get(network.lower(), [])
+        urls = list(mapping.get(network.lower(), []))
+        # Append extra public fallbacks (deduped, preserving configured priority). On a
+        # rate-limited/blocked production host the configured providers can all 429/403 at
+        # once — the Ethereum-DEX "API Offline" symptom — so the failover chain must have
+        # independent providers to rotate to. rpc_call still tries them in order and the
+        # token bucket bounds the rate.
+        for extra in _EXTRA_FALLBACK_RPCS.get(network.lower(), ()):
+            if extra not in urls:
+                urls.append(extra)
+        return urls
 
 
 @lru_cache
