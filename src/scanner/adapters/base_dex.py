@@ -19,6 +19,7 @@ from src.domain.enums import ExchangeStatus, VenueType
 from src.domain.market import CanonicalSymbol, FundingRate, OrderBook
 from src.domain.ports import ExchangeAdapter, MarketDataSink
 from src.scanner.adapters.rate_limiter import TokenBucket
+from src.scanner.adapters.tls import ssl_context
 
 log = get_logger("adapter.dex")
 
@@ -52,7 +53,10 @@ class BaseDexAdapter(ExchangeAdapter):
 
     async def connect(self) -> None:
         timeout = aiohttp.ClientTimeout(total=self._config.dex_rpc_timeout_sec)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+        # certifi-backed TLS (see adapters/tls.py) so RPC/HTTPS verify on hosts whose
+        # system trust store is empty (python.org macOS build, slim Docker images).
+        connector = aiohttp.TCPConnector(ssl=ssl_context())
+        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
     async def disconnect(self) -> None:
         if self._session:

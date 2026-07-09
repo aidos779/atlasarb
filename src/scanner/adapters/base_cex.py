@@ -25,6 +25,7 @@ from src.domain.market import CanonicalSymbol, FundingRate, OrderBook, PriceQuot
 from src.domain.ports import ExchangeAdapter, MarketDataSink
 from src.scanner.adapters.backoff import backoff_delay
 from src.scanner.adapters.rate_limiter import TokenBucket
+from src.scanner.adapters.tls import ssl_context
 from src.scanner.adapters.withdrawal_fees import WithdrawalFeeProvider
 
 log = get_logger("adapter.cex")
@@ -95,7 +96,10 @@ class BaseCexAdapter(ExchangeAdapter):
     async def connect(self) -> None:
         self._stop.clear()
         timeout = aiohttp.ClientTimeout(total=self._config.cex_rest_timeout_sec)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+        # certifi-backed TLS so REST + WSS verify against a known-good CA bundle
+        # regardless of the host's system trust store (see adapters/tls.py).
+        connector = aiohttp.TCPConnector(ssl=ssl_context())
+        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         # Shards are created lazily as pairs are discovered/subscribed.
 
     async def disconnect(self) -> None:

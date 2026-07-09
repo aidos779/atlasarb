@@ -7,6 +7,18 @@ layers below; this file is the only place that knows about all of them at once.
 from __future__ import annotations
 
 import asyncio
+import os
+
+import certifi
+
+# Bind the process-wide default TLS trust store to the bundled certifi CA set BEFORE any
+# library (aiogram/aiohttp/asyncpg) builds its first SSL context. On runtimes whose system
+# trust store is empty — a stock python.org macOS build or a slim Docker image without the
+# ca-certificates package — the default store yields CERTIFICATE_VERIFY_FAILED for every
+# outbound HTTPS/WSS call, which silently offlines every exchange and blocks Telegram
+# delivery. The scanner adapters also set this explicitly per-connector (adapters/tls.py);
+# this covers third-party libraries we don't construct the session for.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties

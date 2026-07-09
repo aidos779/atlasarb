@@ -12,6 +12,7 @@ from decimal import Decimal
 import aiohttp
 
 from src.config import describe_exc, get_logger
+from src.scanner.adapters.tls import ssl_context
 
 log = get_logger("adapter.fx")
 
@@ -33,7 +34,8 @@ class FxRateProvider:
             return
         try:
             timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            connector = aiohttp.TCPConnector(ssl=ssl_context())
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.get(self._endpoint) as resp:
                     if resp.status != 200:
                         return
