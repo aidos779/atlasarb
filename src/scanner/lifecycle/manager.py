@@ -60,7 +60,9 @@ class LifecycleManager:
                 self._cooldown.significant_change(existing.net_profit_usd, signal.net_profit_usd)
                 or signal.ranking != existing.ranking
             )
-            signal.id = existing.id
+            # Signal ids are already deterministic from the route (Signal.route_id), so
+            # existing.id == signal.id here — but keep the original timestamp so age/TTL
+            # continuity is preserved across updates.
             signal.timestamp = existing.timestamp
             signal.last_updated = now
             self.set_ttl(signal)

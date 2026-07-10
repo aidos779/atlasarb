@@ -14,7 +14,7 @@ from src.config.scanner_config import ScannerConfig
 from src.domain.enums import ArbitrageType, ExchangeStatus, VenueType
 from src.domain.market import CanonicalSymbol, FundingRate, OrderBook
 from src.domain.ports import ExchangeAdapter
-from src.domain.signal import Candidate, LegRef
+from src.domain.signal import Candidate, FundingSnapshot, LegRef
 from src.scanner.assembler import SignalAssembler
 from src.scanner.cache.market_state_cache import MarketStateCache
 from src.scanner.priority.scheduler import PriorityClassifier
@@ -84,12 +84,16 @@ async def _assemble_funding(annual_spread: str):
     cache.upsert_funding(FundingRate("binance", "ETH", Decimal("0"), None, now + 3600, 8))
     cache.upsert_funding(FundingRate("okx", "ETH", Decimal("0"), None, now + 3600, 8))
     asm = SignalAssembler(cfg, cache, health, adapters, _Gas(), PriorityClassifier(cfg))
+    snap = FundingSnapshot(received_at=now, current_rate=Decimal("0"),
+                           has_predicted=False, has_next_time=True,
+                           history=(Decimal("0"),))
     cand = Candidate(arb_type=ArbitrageType.FUNDING, base_asset="ETH", quote_asset="USDT",
                      buy_leg=LegRef("binance", "CEX", Decimal(1)),
                      sell_leg=LegRef("okx", "CEX", Decimal(1)),
                      gross_spread_pct=Decimal("0"),
                      funding_annualized_spread=Decimal(annual_spread),
-                     funding_next_time=now + 3600)
+                     funding_next_time=now + 3600,
+                     funding_low=snap, funding_high=snap)
     return await asm.assemble(cand)
 
 

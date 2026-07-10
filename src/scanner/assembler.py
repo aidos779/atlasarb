@@ -15,7 +15,7 @@ from src.config.scanner_config import ScannerConfig
 from src.domain.enums import ArbitrageType, RejectReason
 from src.domain.market import OrderBook
 from src.domain.ports import ExchangeAdapter, GasPriceProvider
-from src.domain.signal import Candidate, Signal
+from src.domain.signal import Candidate, FundingSnapshot, Signal
 from src.scanner.cache.market_state_cache import MarketStateCache
 from src.scanner.liquidity.analyzer import LiquidityAnalyzer
 from src.scanner.priority.scheduler import PriorityClassifier, profit_reference_for
@@ -26,7 +26,12 @@ from src.scanner.profit.liquidity_leg import (
     LiquidityLeg,
 )
 from src.scanner.profit.models import FeeInputs
-from src.scanner.ranking.confidence import ConfidenceInputs, ConfidenceScorer
+from src.scanner.ranking.confidence import (
+    ConfidenceInputs,
+    ConfidenceScorer,
+    FundingLegQuality,
+    funding_confidence,
+)
 from src.scanner.ranking.ranker import RankingEngine, RankInputs, RiskInputs, classify_risk
 from src.scanner.status.health_registry import HealthRegistry
 from src.scanner.validation.validator import (
@@ -227,6 +232,11 @@ class SignalAssembler:
         sell_ad = self._adapters.get(cand.sell_leg.venue)
         if buy_ad is None or sell_ad is None:
             return AssemblyResult(None, RejectReason.STALE_DATA)
+        # Funding candidates always carry both legs' data snapshots (FundingDetector).
+        # Without them there is no real data to score confidence on, so the candidate is
+        # un-assemblable rather than assigned a made-up confidence.
+        if cand.funding_low is None or cand.funding_high is None:
+            return AssemblyResult(None, RejectReason.STALE_DATA)
         size = Decimal(str(self._config.funding_position_size_usd))
         annualized = cand.funding_annualized_spread or Decimal(0)
         # Funding arbitrage is a delta-neutral *carry* held across many settlement
@@ -260,7 +270,7 @@ class SignalAssembler:
                 {"trading", "withdrawal", "gas", "bridge", "slippage"}),
         )
         sizing = SizingProfile(size, capital, size, capital, [(Decimal(100), roi)])
-        conf = 75
+        conf = self._funding_confidence(cand)
         risk = classify_risk(RiskInputs(
             arb_type=ArbitrageType.FUNDING, liquidity_usd=capital,
             liquidity_floor=Decimal(str(self._config.min_liquidity_cex_usd)),
@@ -281,6 +291,32 @@ class SignalAssembler:
         signal.funding_annualized_spread = annualized
         signal.funding_next_time = cand.funding_next_time
         return AssemblyResult(signal, None)
+
+    def _funding_confidence(self, cand: Candidate) -> int:
+        """Live funding confidence (§11.5) — derived entirely from real data, no constant
+        defaults. Each leg's freshness, rate stability (history volatility), exchange
+        health and data completeness feed the score; the weaker leg drives every factor.
+        The funding data is the snapshot the detector captured for this exact candidate
+        (attached to it), so there is no re-read race and no missing-data branch."""
+        now = time.time()
+        max_age = self._config.max_age_funding_sec
+
+        def leg_quality(venue: str, snap: FundingSnapshot) -> FundingLegQuality:
+            return FundingLegQuality(
+                age_sec=now - snap.received_at, max_age_sec=max_age,
+                exchange_health=self._health.health_factor(venue),
+                history=list(snap.history),
+                has_predicted=snap.has_predicted,
+                has_next_time=snap.has_next_time,
+            )
+
+        assert cand.funding_low is not None and cand.funding_high is not None
+        low = leg_quality(cand.buy_leg.venue, cand.funding_low)
+        high = leg_quality(cand.sell_leg.venue, cand.funding_high)
+        score, breakdown = funding_confidence(low, high)
+        log.debug("funding_confidence", coin=cand.base_asset,
+                  buy=cand.buy_leg.venue, sell=cand.sell_leg.venue, **breakdown)
+        return score
 
     def _log_rejection(self, cand: Candidate, bd, sizing, reason) -> None:
         """Full per-candidate diagnostic (Scanner §17): every fee as a % of notional,
@@ -410,6 +446,10 @@ class SignalAssembler:
                       score, warmed) -> Signal:
         now = time.time()
         return Signal(
+            # Deterministic route identity (§13.1): the same opportunity always gets the
+            # same id, so updates and post-expiry re-appearances reuse it instead of
+            # minting a fresh uuid each time.
+            id=cand.route_id(),
             arb_type=cand.arb_type, coin=cand.base_asset,
             trading_pair=f"{cand.base_asset}/{cand.quote_asset}", network=cand.network,
             buy_exchange=cand.buy_leg.venue, sell_exchange=cand.sell_leg.venue,

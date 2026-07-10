@@ -10,7 +10,8 @@ import time
 from decimal import Decimal
 
 from src.domain.enums import ArbitrageType
-from src.domain.signal import Candidate, LegRef
+from src.domain.market import FundingRate
+from src.domain.signal import Candidate, FundingSnapshot, LegRef
 from src.scanner.detectors.base import DetectionContext, Detector
 
 _MIN_LEAD_SEC = 120  # §7.4 minimum lead time to settlement
@@ -55,4 +56,17 @@ class FundingDetector(Detector):
             gross_spread_pct=annualized_spread * Decimal(100),
             funding_annualized_spread=annualized_spread,
             funding_next_time=min(low.next_funding_time, high.next_funding_time),
+            funding_low=self._snapshot(ctx, low),
+            funding_high=self._snapshot(ctx, high),
         )]
+
+    @staticmethod
+    def _snapshot(ctx: DetectionContext, fr: FundingRate) -> FundingSnapshot:
+        """Freeze one leg's funding data at detection time for the confidence model."""
+        return FundingSnapshot(
+            received_at=fr.received_at,
+            current_rate=fr.current_rate,
+            has_predicted=fr.predicted_rate is not None,
+            has_next_time=bool(fr.next_funding_time),
+            history=tuple(ctx.cache.funding_window(fr.venue, fr.base_asset)),
+        )

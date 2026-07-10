@@ -29,13 +29,14 @@ class MarketCollector:
     def __init__(
         self, config: ScannerConfig, cache: MarketStateCache,
         adapters: dict[str, ExchangeAdapter], priority: PriorityClassifier,
-        force_expire_delisted: ForceExpireDelisted,
+        force_expire_delisted: ForceExpireDelisted, health=None,
     ) -> None:
         self._config = config
         self._cache = cache
         self._adapters = adapters
         self._priority = priority
         self._force_expire = force_expire_delisted
+        self._health = health
         self._tracked: dict[str, set[str]] = defaultdict(set)     # venue -> pairs
         self._missing_since: dict[tuple[str, str], float] = {}
         self._discovery_failed: set[str] = set()   # venues currently failing discovery
@@ -84,6 +85,10 @@ class MarketCollector:
             if venue in self._discovery_failed:
                 self._discovery_failed.discard(venue)
                 log.info("discovery_recovered", venue=venue)
+            # Discovery is an independent signal from quote freshness (§2.2): record it
+            # for monitoring, but it never drives maintenance/offline on its own.
+            if self._health is not None:
+                self._health.record_discovery(venue)
             current = {m.pair for m in markets if m.quote_asset in ("USDT", "USDC")}
             await self._apply_discovery(venue, adapter, markets, current)
         # Refresh priority top-100 from breadth of tracked pairs (proxy).

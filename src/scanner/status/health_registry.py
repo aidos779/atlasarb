@@ -28,7 +28,15 @@ class VenueHealth:
     consecutive_success: int = 0
     consecutive_failure: int = 0
     last_success_at: float = 0.0
-    last_ws_data_at: float = 0.0   # last real market-data tick (WS/pool), not REST ping
+    # Two INDEPENDENT liveness signals (§2.2), deliberately not conflated:
+    #   last_ws_data_at   — last real market-data tick (WS book / DEX pool read). This is
+    #                      the "can we price it right now" (quote-freshness) signal and the
+    #                      ONLY input to maintenance/staleness.
+    #   last_discovery_at — last successful market/pool discovery. Informational only; a
+    #                      stale discovery snapshot must NEVER offline a venue that is
+    #                      still quoting.
+    last_ws_data_at: float = 0.0
+    last_discovery_at: float = 0.0
     latencies_ms: deque[float] = field(default_factory=lambda: deque(maxlen=50))
     errors: deque[int] = field(default_factory=lambda: deque(maxlen=50))  # 1=err,0=ok
 
@@ -69,6 +77,28 @@ class HealthRegistry:
 
     def all_statuses(self) -> dict[str, ExchangeStatus]:
         return {v: h.status for v, h in self._venues.items()}
+
+    def record_discovery(self, venue: str, now: float | None = None) -> None:
+        """Mark a successful market/pool discovery. Informational only — discovery
+        freshness is reported for monitoring but is NEVER an input to maintenance or
+        offline transitions (§2.2: health = execution capability, not discovery timing)."""
+        self._venues[venue].last_discovery_at = now or time.time()
+
+    def venue_report(self, venue: str, quote_stale_sec: float,
+                     now: float | None = None) -> dict:
+        """The independent quote/discovery liveness signals + overall status, for
+        monitoring/logs. ``quote`` is the only signal that gates execution capability;
+        ``discovery`` is reported for diagnosis but does not drive the status (§2.2)."""
+        h = self._venues[venue]
+        now = now or time.time()
+        return {
+            "venue": venue,
+            "status": h.status.value,
+            "quote_age_sec": round(now - h.last_ws_data_at, 1) if h.last_ws_data_at else None,
+            "quote_fresh": bool(h.last_ws_data_at and now - h.last_ws_data_at <= quote_stale_sec),
+            "discovery_age_sec": (round(now - h.last_discovery_at, 1)
+                                  if h.last_discovery_at else None),
+        }
 
     def record_success(self, venue: str, latency_ms: float = 0.0,
                        stream: bool = False) -> None:

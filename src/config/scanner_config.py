@@ -141,6 +141,9 @@ class ScannerConfig:
     max_age_dex_price_sec: float = 26.0        # ~2x block interval buffer
     max_age_orderbook_cex_sec: float = 15.0
     max_age_funding_sec: float = 120.0
+    # Rolling funding-rate samples kept per (venue, base) for the funding confidence
+    # stability/volatility factor (§11.5).
+    funding_history_window: int = 20
 
     # ── Scheduling (§1.1, §1.6, §16) ──
     reconciliation_interval_sec: float = 1.0   # safety-net max every 1s

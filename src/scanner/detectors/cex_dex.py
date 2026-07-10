@@ -26,16 +26,20 @@ class CexDexDetector(Detector):
         if not cex or not dex:
             return []
 
+        # Pre-compute each DEX venue's spot + network once (independent of the CEX leg),
+        # instead of recomputing them inside the O(n·m) inner loop.
+        dex_priced: list[tuple[str, str | None, Decimal, object]] = []
+        for dex_venue, dex_book in dex:  # type: ignore[assignment]
+            info = ctx.venues.get(dex_venue)
+            network = info.network if info else None
+            dex_spot = (dex_book.reserve_quote / dex_book.reserve_base
+                        if dex_book.reserve_base else Decimal(0))
+            if dex_spot > 0:
+                dex_priced.append((dex_venue, network, dex_spot, dex_book))
+
         candidates: list[Candidate] = []
         for cex_venue, cex_quote in cex:  # type: ignore[assignment]
-            for dex_venue, dex_book in dex:  # type: ignore[assignment]
-                info = ctx.venues.get(dex_venue)
-                network = info.network if info else None
-                dex_spot = (dex_book.reserve_quote / dex_book.reserve_base
-                            if dex_book.reserve_base else Decimal(0))
-                if dex_spot <= 0:
-                    continue
-
+            for dex_venue, network, dex_spot, dex_book in dex_priced:
                 # Direction A: buy CEX (ask), sell DEX (spot)
                 gross_a = self._gross_spread_pct(cex_quote.ask, dex_spot)
                 # Direction B: buy DEX (spot), sell CEX (bid)

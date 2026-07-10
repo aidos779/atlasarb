@@ -91,9 +91,9 @@ class ScanningEngine:
 
         self._market_collector = MarketCollector(
             config, self._cache, adapters, self._priority,
-            self._lifecycle.force_expire_delisted,
+            self._lifecycle.force_expire_delisted, health=self._health,
         )
-        self._dex_collector = DexPoolCollector(config, self._cache, adapters)
+        self._dex_collector = DexPoolCollector(config, self._cache, adapters, self._health)
         self._funding_collector = FundingCollector(
             config, self._cache, adapters, self._perp_assets
         )
@@ -285,6 +285,13 @@ class ScanningEngine:
         dex = [v for v, a in self._adapters.items() if a.venue_type.value == "DEX"]
         cex_online = sum(1 for v in cex if statuses[v].signal_allowed)
         dex_online = sum(1 for v in dex if statuses[v].signal_allowed)
+        # Quote-fresh vs discovery are independent (§2.2): a venue can be quoting fine
+        # while its discovery snapshot is stale. Report DEX quote freshness separately so
+        # a discovery hiccup is visibly NOT the same as an execution-capability outage.
+        dex_quoting = sum(
+            1 for v in dex
+            if self._health.venue_report(v, self._config.stale_dex_rpc_sec)["quote_fresh"]
+        )
         # One RPC pool per EVM network (adapters on the same network share the URL
         # set but track health independently — report the best view per network).
         rpc_by_network: dict[str, tuple[int, int]] = {}
@@ -304,6 +311,7 @@ class ScanningEngine:
         summary = {
             "cex_online": f"{cex_online}/{len(cex)}",
             "dex_online": f"{dex_online}/{len(dex)}",
+            "dex_quoting": f"{dex_quoting}/{len(dex)}",
             "rpc_healthy": f"{rpc_healthy}/{rpc_total}",
             "signals_per_min": round((m.signals_created - prev["signals"]) / minutes, 2),
             "errors_per_min": round((errors_now - prev["errors"]) / minutes, 2),

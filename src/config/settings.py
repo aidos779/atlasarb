@@ -61,6 +61,13 @@ _EXTRA_FALLBACK_RPCS: dict[str, tuple[str, ...]] = {
     "solana": ("https://solana-rpc.publicnode.com",),
 }
 
+# Ankr's URL path segment per network (used only when an API key is configured, to
+# rewrite an unauthenticated endpoint into its authenticated form).
+_ANKR_CHAIN: dict[str, str] = {
+    "ethereum": "eth", "bnb": "bsc", "arbitrum": "arbitrum", "optimism": "optimism",
+    "base": "base", "polygon": "polygon", "solana": "solana",
+}
+
 
 def _split_csv(value: str | list[str] | None) -> list[str]:
     if not value:
@@ -160,6 +167,12 @@ class Settings(BaseSettings):
     solana_rpc_urls: list[str] = Field(default_factory=list)
     jupiter_api_url: str = "https://lite-api.jup.ag/swap/v1"
 
+    # Optional Ankr API key. Public unauthenticated Ankr endpoints (rpc.ankr.com/<chain>)
+    # now return 401/Unauthorized and are dropped from the pool. With a key set, they are
+    # rewritten to the authenticated form (rpc.ankr.com/<chain>/<key>); without one, Ankr
+    # is skipped entirely rather than retried forever.
+    ankr_api_key: str = ""
+
     scanner_config_file: str = "config/scanner.toml"
 
     @classmethod
@@ -208,16 +221,36 @@ class Settings(BaseSettings):
             "polygon": self.polygon_rpc_urls,
             "solana": self.solana_rpc_urls,
         }
-        urls = list(mapping.get(network.lower(), []))
+        net = network.lower()
+        urls: list[str] = []
         # Append extra public fallbacks (deduped, preserving configured priority). On a
         # rate-limited/blocked production host the configured providers can all 429/403 at
         # once — the Ethereum-DEX "API Offline" symptom — so the failover chain must have
         # independent providers to rotate to. rpc_call still tries them in order and the
         # token bucket bounds the rate.
-        for extra in _EXTRA_FALLBACK_RPCS.get(network.lower(), ()):
-            if extra not in urls:
-                urls.append(extra)
+        for url in [*mapping.get(net, []), *_EXTRA_FALLBACK_RPCS.get(net, ())]:
+            resolved = self._resolve_ankr(url, net)
+            if resolved is not None and resolved not in urls:
+                urls.append(resolved)
         return urls
+
+    def _resolve_ankr(self, url: str, network: str) -> str | None:
+        """Auth-aware Ankr handling. A public ``rpc.ankr.com/<chain>`` endpoint is
+        dropped (returns None) unless an API key is configured, in which case it is
+        rewritten to the authenticated ``rpc.ankr.com/<chain>/<key>`` form. Endpoints
+        that already carry a key, and every non-Ankr URL, pass through unchanged."""
+        if "rpc.ankr.com" not in url:
+            return url
+        from urllib.parse import urlsplit
+        parts = urlsplit(url)
+        segments = [s for s in parts.path.split("/") if s]
+        # Authenticated form already has a key segment after the chain (e.g. /eth/<key>).
+        if len(segments) >= 2:
+            return url
+        if not self.ankr_api_key:
+            return None  # skip unauthenticated Ankr entirely
+        chain = segments[0] if segments else _ANKR_CHAIN.get(network, network)
+        return f"{parts.scheme}://{parts.netloc}/{chain}/{self.ankr_api_key}"
 
 
 @lru_cache

@@ -151,7 +151,7 @@ def test_isolated_failures_do_not_disable_provider():
         pool.record_failure("u1", RpcErrorKind.TIMEOUT)
         pool.record_success("u1", latency_ms=100)
     snap = {p["url"]: p for p in pool.snapshot()}
-    assert not snap["u1"]["disabled"]
+    assert snap["u1"]["state"] == "closed"
 
 
 def test_consecutive_failures_disable_then_recover():
@@ -160,13 +160,13 @@ def test_consecutive_failures_disable_then_recover():
     for _ in range(3):
         pool.record_failure("u1", RpcErrorKind.HTTP)
     snap = {p["url"]: p for p in pool.snapshot()}
-    assert snap["u1"]["disabled"]
+    assert snap["u1"]["state"] == "open"  # tripped, cooling down
     # A disabled provider is excluded from rotation while u2 is healthy.
     assert pool.order() == ["u2"]
-    # One success after the cooldown probe fully restores it.
+    # One success after the cooldown probe fully restores it (breaker closes).
     pool.record_success("u1", latency_ms=50)
     snap = {p["url"]: p for p in pool.snapshot()}
-    assert not snap["u1"]["disabled"]
+    assert snap["u1"]["state"] == "closed"
     assert snap["u1"]["fail_streak"] == 0
 
 

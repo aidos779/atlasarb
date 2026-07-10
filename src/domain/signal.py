@@ -18,6 +18,15 @@ from src.domain.enums import (
     SignalStatus,
 )
 
+# Stable namespace for deterministic route → signal-id derivation (uuid5). Fixed value:
+# changing it would reshuffle every signal id, so it must never change.
+_ROUTE_ID_NAMESPACE = uuid.UUID("a7c1f2e0-9b3d-5e64-8f21-0d4c6b8a1e37")
+
+
+def _route_id(dedup_key: tuple) -> str:
+    """Deterministic uuid5 of a route dedup key — stable across the process and restarts."""
+    return str(uuid.uuid5(_ROUTE_ID_NAMESPACE, repr(dedup_key)))
+
 
 @dataclass
 class LegRef:
@@ -62,6 +71,19 @@ class SizingProfile:
     profit_decay: list[tuple[Decimal, Decimal]]  # (size%, roi%) at 25/50/75/100
 
 
+@dataclass(frozen=True)
+class FundingSnapshot:
+    """Immutable funding-data snapshot for one leg, captured by the detector at the
+    instant the candidate is formed, so the funding confidence model (§11.5) scores
+    exactly the data that produced the opportunity — no re-read race, no default value."""
+
+    received_at: float                  # when the funding sample was received
+    current_rate: Decimal
+    has_predicted: bool                 # predicted_rate present
+    has_next_time: bool                 # next_funding_time present/valid
+    history: tuple[Decimal, ...]        # recent funding-rate samples (volatility input)
+
+
 @dataclass
 class Candidate:
     """Raw opportunity emitted by a detector (Scanner §7), pre-validation."""
@@ -80,12 +102,25 @@ class Candidate:
     bridge_time_sec: int | None = None
     funding_annualized_spread: Decimal | None = None  # §7.4
     funding_next_time: float | None = None
+    # Funding-leg data snapshots (§7.4 → §11.5 confidence). low = long/buy leg (lower
+    # funding), high = short/sell leg (higher funding). Captured at detection time.
+    funding_low: FundingSnapshot | None = None
+    funding_high: FundingSnapshot | None = None
     detected_at: float = field(default_factory=time.time)
 
     def dedup_key(self) -> tuple:
         """Scanner §13.1 order-independent venue-pair key."""
         venues = tuple(sorted((self.buy_leg.venue, self.sell_leg.venue)))
         return (self.arb_type.value, self.base_asset, self.quote_asset, venues, self.network)
+
+    def route_id(self) -> str:
+        """Deterministic signal identity for this execution route (§13.1).
+
+        The same underlying opportunity — same arbitrage type, asset, trading pair,
+        network and venue pair — always maps to the same id, so price/spread/profit
+        updates reuse it and a re-appearance after expiry keeps it. A new id is minted
+        only when the route itself changes."""
+        return _route_id(self.dedup_key())
 
 
 @dataclass
@@ -161,6 +196,15 @@ class Signal:
         venues = tuple(sorted((self.buy_exchange, self.sell_exchange)))
         return (self.arb_type.value, self.coin, self.trading_pair.split("/")[-1],
                 venues, self.network)
+
+    def route_id(self) -> str:
+        """Deterministic signal identity for this execution route (§13.1).
+
+        The same underlying opportunity — same arbitrage type, asset, trading pair,
+        network and venue pair — always maps to the same id, so price/spread/profit
+        updates reuse it and a re-appearance after expiry keeps it. A new id is minted
+        only when the route itself changes."""
+        return _route_id(self.dedup_key())
 
     def age_sec(self, now: float | None = None) -> int:
         return int((now or time.time()) - self.timestamp)

@@ -18,13 +18,23 @@ log = get_logger("scanner.poll")
 
 
 class DexPoolCollector:
-    """Polls DEX pool state per network block interval (§4.2/§5.5)."""
+    """Polls DEX pool state per network block interval (§4.2/§5.5).
+
+    Discovery (listing the venue's pools) and quoting (reading their reserves) are kept
+    independent: if a discovery call fails, the collector keeps quoting the last known
+    pool set, so a stale/failed discovery snapshot never starves the quote feed (and thus
+    never drives the venue to Maintenance — §2.2 health = execution capability).
+    """
 
     def __init__(self, config: ScannerConfig, cache: MarketStateCache,
-                 adapters: dict[str, ExchangeAdapter]) -> None:
+                 adapters: dict[str, ExchangeAdapter], health=None) -> None:
         self._config = config
         self._cache = cache
+        self._health = health
         self._adapters = {v: a for v, a in adapters.items() if a.venue_type == VenueType.DEX}
+        # Last successfully-discovered pool set per venue — reused for quoting when a
+        # later discovery call fails, so quoting is decoupled from discovery health.
+        self._last_markets: dict[str, list] = {}
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -42,11 +52,21 @@ class DexPoolCollector:
         )
 
     async def _poll_venue(self, venue: str, adapter: ExchangeAdapter) -> None:
+        # ── discovery (independent of quoting) ──
         try:
             markets = await adapter.get_markets()
+            self._last_markets[venue] = markets
+            if self._health is not None:
+                self._health.record_discovery(venue)
         except Exception as exc:  # noqa: BLE001
-            log.debug("dex_market_poll_failed", venue=venue, error=describe_exc(exc))
-            return
+            # Discovery failed — fall back to the last known pool set so quoting
+            # continues. Only if we have never discovered anything do we stop here.
+            markets = self._last_markets.get(venue)
+            if not markets:
+                log.debug("dex_market_poll_failed", venue=venue, error=describe_exc(exc))
+                return
+            log.debug("dex_discovery_stale_quoting_cached", venue=venue,
+                      pools=len(markets), error=describe_exc(exc))
         for sym in markets:
             if not self._cache.is_tracked(venue, sym.pair):
                 self._cache.track(venue, sym)

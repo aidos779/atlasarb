@@ -24,19 +24,21 @@ class DexDexDetector(Detector):
         if len(dex) < 2:
             return []
 
+        # Pre-compute each pool's spot + network once, so the O(n²) pairwise loop below
+        # reuses them instead of recomputing spot/network for every pair.
+        priced: list[tuple[str, str | None, Decimal, object]] = []
+        for venue, book in dex:  # type: ignore[assignment]
+            spot = book.reserve_quote / book.reserve_base if book.reserve_base else Decimal(0)
+            if spot <= 0:
+                continue
+            info = ctx.venues.get(venue)
+            priced.append((venue, info.network if info else None, spot, book))
+
         candidates: list[Candidate] = []
-        for i in range(len(dex)):
-            for j in range(i + 1, len(dex)):
-                v1, b1 = dex[i]      # type: ignore[misc]
-                v2, b2 = dex[j]      # type: ignore[misc]
-                p1 = b1.reserve_quote / b1.reserve_base if b1.reserve_base else Decimal(0)
-                p2 = b2.reserve_quote / b2.reserve_base if b2.reserve_base else Decimal(0)
-                if p1 <= 0 or p2 <= 0:
-                    continue
-                net1 = ctx.venues.get(v1)
-                net2 = ctx.venues.get(v2)
-                n1 = net1.network if net1 else None
-                n2 = net2.network if net2 else None
+        for i in range(len(priced)):
+            for j in range(i + 1, len(priced)):
+                v1, n1, p1, b1 = priced[i]
+                v2, n2, p2, b2 = priced[j]
                 same_chain = n1 == n2
                 if not same_chain:
                     # Cross-network pairs are the CrossChainDetector's job — it

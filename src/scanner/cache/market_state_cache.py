@@ -33,6 +33,11 @@ class MarketStateCache:
         self._prices: dict[tuple[str, str], PriceQuote] = {}      # (venue, pair) -> quote
         self._books: dict[tuple[str, str], OrderBook] = {}
         self._funding: dict[tuple[str, str], FundingRate] = {}    # (venue, base) -> funding
+        # Rolling history of recent funding rates per (venue, base) — feeds the funding
+        # confidence model's stability/volatility factor (§11.5).
+        self._funding_windows: dict[tuple[str, str], deque[Decimal]] = defaultdict(
+            lambda: deque(maxlen=self._config.funding_history_window)
+        )
         self._price_windows: dict[tuple[str, str], deque[Decimal]] = defaultdict(
             lambda: deque(maxlen=self._config.outlier_window_ticks)
         )
@@ -110,7 +115,14 @@ class MarketStateCache:
         self._emit(book.symbol.base_asset, book.symbol.quote_asset, book.venue)
 
     def upsert_funding(self, funding: FundingRate) -> None:
-        self._funding[(funding.venue, funding.base_asset)] = funding
+        key = (funding.venue, funding.base_asset)
+        self._funding[key] = funding
+        self._funding_windows[key].append(funding.current_rate)
+
+    def funding_window(self, venue: str, base_asset: str) -> list[Decimal]:
+        """Recent funding-rate history for one (venue, base) — for the confidence
+        stability/volatility factor."""
+        return list(self._funding_windows.get((venue, base_asset), ()))
 
     # ── validation (§4.5) ──
     def _valid_price(self, quote: PriceQuote, key: tuple[str, str]) -> bool:

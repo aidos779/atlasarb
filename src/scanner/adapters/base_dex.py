@@ -38,6 +38,26 @@ class _RpcFailure(Exception):
         self.kind = kind
 
 
+# Substrings that identify a permanent authentication failure in a response body /
+# JSON-RPC error message (vs a transient block or throttle).
+_AUTH_MARKERS = ("unauthorized", "api key", "apikey", "must be authenticated",
+                 "authentication required", "invalid key", "forbidden: token")
+
+
+def _auth_body(text: str | None) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_MARKERS)
+
+
+async def _safe_text(resp) -> str | None:
+    try:
+        return (await resp.text())[:300]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class BaseDexAdapter(ExchangeAdapter):
     venue_type = VenueType.DEX
 
@@ -148,16 +168,26 @@ class BaseDexAdapter(ExchangeAdapter):
             try:
                 async with self._session.post(url, json=payload) as resp:
                     if resp.status != 200:
-                        # 429/403 is the usual production failure: the host's IP is
-                        # rate-limited/blocked by that public RPC. Classify so a block
-                        # backs off harder than a transient RPC error, and so the log
-                        # names the real cause.
+                        # Classify so the health log names the real cause and each kind
+                        # backs off appropriately. 401 (and 403 with an auth body) means
+                        # the endpoint needs a key we don't have — a permanent failure
+                        # that must be retired, not retried (e.g. public Ankr endpoints).
+                        # 429 is throttling; other non-200 is a generic HTTP failure.
+                        if resp.status == 401 or (resp.status == 403 and _auth_body(
+                                await _safe_text(resp))):
+                            raise _RpcFailure(RpcErrorKind.UNAUTHORIZED,
+                                              f"http {resp.status} (auth required)")
                         kind = (RpcErrorKind.RATE_LIMIT if resp.status == 429
                                 else RpcErrorKind.HTTP)
                         raise _RpcFailure(kind, f"http {resp.status}")
                     data = await resp.json(content_type=None)
                     if "error" in data:
-                        raise _RpcFailure(RpcErrorKind.RPC_ERROR, str(data["error"]))
+                        err = data["error"]
+                        # Some providers return 200 with a JSON-RPC auth error instead
+                        # of 401 — treat those as permanent too.
+                        if _auth_body(str(err)):
+                            raise _RpcFailure(RpcErrorKind.UNAUTHORIZED, str(err))
+                        raise _RpcFailure(RpcErrorKind.RPC_ERROR, str(err))
                     result = data.get("result")
                     if result is None:
                         # Some public nodes answer 200 with a null result when degraded.
