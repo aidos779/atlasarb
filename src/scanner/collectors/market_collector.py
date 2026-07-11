@@ -109,8 +109,15 @@ class MarketCollector:
             log.debug("pair_discovered", venue=venue, pair=sym.pair)
         # Subscribe streams for new CEX symbols; DEX pulled via pool polling.
         if new_symbols and adapter.venue_type == VenueType.CEX:
-            await adapter.subscribe_ticker(new_symbols)
-            await adapter.subscribe_order_book(new_symbols, depth=20)
+            # A venue's WS subscription budget (ws_max_conns x ws_max_symbols_per_conn)
+            # is far below its tradable universe (e.g. mexc caps at 150 vs ~2000 pairs),
+            # so the adapter silently drops pairs once the cap is hit. Feed the highest-
+            # priority pairs FIRST (priority1 majors, then top100) so the scarce slots
+            # cover the pairs most likely to produce actionable signals, instead of
+            # whatever arbitrary order the exchange listing happened to return.
+            ordered = sorted(new_symbols, key=lambda m: self._priority.priority(m.base_asset))
+            await adapter.subscribe_ticker(ordered)
+            await adapter.subscribe_order_book(ordered, depth=20)
         if new_symbols:
             log.info("discovery_updated", venue=venue,
                      new=len(new_symbols), tracked=len(known))
