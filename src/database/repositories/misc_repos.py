@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database.models import (
@@ -156,10 +158,24 @@ class NotificationRepository:
 
     async def set_cooldown(self, user_id: int, dedup_key: str, net_pct: float,
                            until: datetime) -> None:
-        row = await self.get_cooldown(user_id, dedup_key)
-        if row:
-            row.last_net_pct = net_pct
-            row.until = until
-        else:
-            self._session.add(AlertCooldown(
-                user_id=user_id, dedup_key=dedup_key, last_net_pct=net_pct, until=until))
+        """Idempotent UPSERT on (user_id, dedup_key).
+
+        The former read-then-insert raced: the per-tier delayed passes (0/10/60s) and
+        concurrent signals for the same (user, dedup_key) could both read no existing
+        row and both INSERT, violating uq_alert_cooldown and aborting that user's
+        delivery. INSERT ... ON CONFLICT DO UPDATE closes the window atomically — the
+        losing writer updates instead of raising.
+        """
+        dialect = self._session.get_bind().dialect.name
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        stmt = (
+            insert(AlertCooldown)
+            .values(user_id=user_id, dedup_key=dedup_key,
+                    last_net_pct=net_pct, until=until)
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["user_id", "dedup_key"],
+            set_={"last_net_pct": stmt.excluded.last_net_pct,
+                  "until": stmt.excluded.until},
+        )
+        await self._session.execute(stmt)
