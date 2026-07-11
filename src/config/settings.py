@@ -40,19 +40,33 @@ _EXTRA_FALLBACK_RPCS: dict[str, tuple[str, ...]] = {
     # Ethereum endpoints below were each verified to return a real eth_blockNumber from a
     # clean network; flaky ones (that 200 with a null result or serve HTML) were dropped
     # because they would poison the failover chain.
+    # Independent operators (different data centres / companies) so one operator's outage
+    # can't take out several list entries at once. Each verified to return a live
+    # eth_blockNumber without any API key on 2026-07-11. Public Ankr (rpc.ankr.com/eth)
+    # is deliberately absent — it now answers "Unauthorized: you must be authenticated",
+    # so it is retired at config time by _resolve_ankr unless ANKR_API_KEY is set.
     "ethereum": (
-        "https://ethereum.publicnode.com",
-        "https://eth.merkle.io",
-        "https://rpc.mevblocker.io",
-        "https://eth-mainnet.public.blastapi.io",
-        "https://eth.rpc.blxrbdn.com",
-        "https://eth.api.onfinality.io/public",
-        "https://rpc.flashbots.net",
+        "https://ethereum.publicnode.com",     # PublicNode / Allnodes
+        "https://eth.merkle.io",               # Merkle
+        "https://rpc.mevblocker.io",           # MevBlocker / CoW
+        "https://eth-mainnet.public.blastapi.io",  # Bware / BlastAPI
+        "https://eth.rpc.blxrbdn.com",         # bloXroute
+        "https://eth.api.onfinality.io/public",    # OnFinality
+        "https://rpc.flashbots.net",           # Flashbots
+        "https://eth.meowrpc.com",             # MeowRPC
+        "https://eth-pokt.nodies.app",         # Nodies / POKT
+        "https://gateway.tenderly.co/public/mainnet",  # Tenderly
+        "https://api.zan.top/eth-mainnet",     # Zan
+        "https://eth.blockrazor.xyz",          # BlockRazor
     ),
     "bnb": (
-        "https://bsc.publicnode.com",
-        "https://bsc-dataseed1.defibit.io",
-        "https://bsc-dataseed1.ninicoin.io",
+        "https://bsc.publicnode.com",          # PublicNode / Allnodes
+        "https://bsc-dataseed1.defibit.io",    # Defibit
+        "https://bsc-dataseed1.ninicoin.io",   # Ninicoin
+        "https://1rpc.io/bnb",                 # Automata 1RPC
+        "https://bsc.meowrpc.com",             # MeowRPC
+        "https://bsc-pokt.nodies.app",         # Nodies / POKT
+        "https://bsc.drpc.org",                # dRPC
     ),
     "arbitrum": ("https://arbitrum-one.publicnode.com", "https://arbitrum.meowrpc.com"),
     "optimism": ("https://optimism.publicnode.com", "https://optimism.meowrpc.com"),
