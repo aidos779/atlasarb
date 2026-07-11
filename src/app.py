@@ -39,6 +39,7 @@ from src.database.repositories.history_repo import HistoryRepository
 from src.domain.dev_mode import set_unlimited_access
 from src.scanner.adapters.fx import FxRateProvider
 from src.scanner.adapters.registry import build_scanner_components
+from src.scanner.adapters.rpc_health import log_startup_rpc_health
 from src.scanner.engine import ScanningEngine
 from src.services.admin_service import AdminService
 from src.services.analytics_service import AnalyticsService
@@ -196,6 +197,13 @@ class Application:
         self.scheduler.bind_notifier(notifier)
 
         await self.engine.start()
+        # Fire-and-forget: probe every configured RPC endpoint once and log how many are
+        # actually reachable at boot (diagnostics only — never gates the pool). Kept off
+        # the startup path so it cannot delay polling; a reference is held so the task is
+        # not garbage-collected before it finishes.
+        self._rpc_health_task = asyncio.create_task(
+            log_startup_rpc_health(self.settings, self.config_manager.config),
+            name="rpc-startup-health")
         self.notifications.start()
         self.scheduler.start()
         await self.bot.set_my_commands(_COMMANDS)
