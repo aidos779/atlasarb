@@ -32,7 +32,7 @@ class OkxAdapter(BaseCexAdapter):
     async def _fetch_markets(self, session: aiohttp.ClientSession) -> list[CanonicalSymbol]:
         data = await self._get_json_logged(
             session, f"{self._rest_url}/api/v5/public/instruments",
-            params={"instType": "SPOT"})
+            params={"instType": "SPOT"}, timeout_sec=self._config.cex_discovery_timeout_sec)
         out = []
         for s in data.get("data", []):
             if s.get("state") != "live":

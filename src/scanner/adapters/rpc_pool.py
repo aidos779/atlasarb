@@ -85,13 +85,15 @@ class _Provider:
             return BreakerState.HALF_OPEN
         return BreakerState.CLOSED
 
-    def rank(self, now: float, best_latency_ms: float) -> float:
+    def rank(self, now: float, best_latency_ms: float, slow_latency_ms: float = 0.0) -> float:
         """Adaptive health rank (higher = healthier), latency-relative.
 
         Success rate dominates; latency is penalised **relative to the pool's current
         best** so the ranking converges onto the fastest healthy endpoint regardless
         of absolute network speed. Recent timeouts, recency of the last good response
-        and stability since the last failure refine the ordering.
+        and stability since the last failure refine the ordering. A provider slower than
+        ``slow_latency_ms`` takes an extra fixed penalty so a genuinely slow node sinks
+        below faster peers (but stays in rotation as a last resort).
         """
         r = self.score
         # Latency, relative to the fastest healthy provider (0 penalty at parity,
@@ -99,6 +101,10 @@ class _Provider:
         if self.latency_ms > 0 and best_latency_ms > 0:
             ratio = self.latency_ms / best_latency_ms
             r -= min((ratio - 1.0) / 2.0, 1.0) * 0.35 if ratio > 1.0 else 0.0
+        # Absolute slow-node floor: past the configured ceiling, take a fixed −0.5 hit so
+        # any provider under the ceiling outranks it regardless of relative comparison.
+        if slow_latency_ms > 0 and self.latency_ms > slow_latency_ms:
+            r -= 0.5
         # Timeout aversion: a provider that times out is worse than one that errors
         # fast, because a timeout also costs us the full request budget.
         r -= self.timeout_rate * 0.20
@@ -120,6 +126,7 @@ class RpcProviderPool:
     cooldown_base_sec: float = 20.0
     cooldown_max_sec: float = 300.0
     network: str = ""
+    slow_latency_ms: float = 0.0    # de-prioritize (don't disable) nodes slower than this
     _providers: list[_Provider] = field(default_factory=list)
     _cursor: int = 0
 
@@ -127,10 +134,12 @@ class RpcProviderPool:
         self._providers = [_Provider(u) for u in self.urls]
 
     def update_config(self, fail_threshold: int, cooldown_base: float,
-                      cooldown_max: float) -> None:
+                      cooldown_max: float, slow_latency_ms: float | None = None) -> None:
         self.fail_threshold = fail_threshold
         self.cooldown_base_sec = cooldown_base
         self.cooldown_max_sec = cooldown_max
+        if slow_latency_ms is not None:
+            self.slow_latency_ms = slow_latency_ms
 
     def order(self, now: float | None = None) -> list[str]:
         """URLs to try this call, best-first.
@@ -154,7 +163,8 @@ class RpcProviderPool:
                                default=0.0)
             # Coarse rank buckets keep round-robin spread among near-equal providers
             # while a genuinely slower/unhealthier endpoint sinks below solid ones.
-            healthy.sort(key=lambda p: round(p.rank(now, best_latency), 1), reverse=True)
+            healthy.sort(key=lambda p: round(p.rank(now, best_latency, self.slow_latency_ms), 1),
+                         reverse=True)
             return [p.url for p in healthy]
         # All open → probe the non-permanent one closest to recovery so we never block.
         probes = [p for p in self._providers if not p.permanent]

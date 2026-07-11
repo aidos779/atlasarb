@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from abc import abstractmethod
 from decimal import Decimal
 from urllib.parse import urlsplit, urlunsplit
@@ -45,6 +46,9 @@ _http_log_throttle = LogThrottle(interval_sec=60.0)
 # keyed on close_code so a rare policy/auth close (1008/4004) is never hidden behind the
 # routine 1006 churn.
 _ws_log_throttle = LogThrottle(interval_sec=60.0)
+# A shard that stays offline keeps failing every slow-retry cycle — throttle the escalated
+# alert so it fires periodically (with a suppressed count), not on every cycle.
+_ws_offline_throttle = LogThrottle(interval_sec=120.0)
 
 
 def redact_proxy(url: str) -> str:
@@ -233,7 +237,8 @@ class BaseCexAdapter(ExchangeAdapter):
         self._status = ExchangeStatus.UNKNOWN
 
     async def _get_json_logged(self, session: aiohttp.ClientSession, url: str,
-                               params: dict | None = None) -> object:
+                               params: dict | None = None,
+                               timeout_sec: float | None = None) -> object:
         """GET + parse JSON with strict HTTP error handling.
 
         Any non-200 response is a transport failure, not a document: no JSON decoding is
@@ -241,8 +246,14 @@ class BaseCexAdapter(ExchangeAdapter):
         prefix) is raised immediately, and the warning is throttled so a persistent
         403/451 block emits one aggregated line per minute instead of flooding the logs.
         A 200 with a non-JSON body (CDN interstitial) raises the same structured error.
+
+        ``timeout`` overrides the session-level REST budget for this one call — used by
+        market discovery, whose large payload needs longer than a normal quote fetch.
         """
-        async with session.get(url, params=params) as resp:
+        req: dict = {"params": params}
+        if timeout_sec is not None:
+            req["timeout"] = aiohttp.ClientTimeout(total=timeout_sec)
+        async with session.get(url, **req) as resp:
             if resp.status != 200:
                 snippet = (await resp.text())[:200].replace("\n", " ")
                 err = RestError(
@@ -405,6 +416,8 @@ class BaseCexAdapter(ExchangeAdapter):
     async def _shard_loop(self, idx: int) -> None:
         attempt = 0
         offline = False  # True once this shard escalated to slow-retry
+        offline_since = 0.0
+        offline_cycles = 0
         # Stagger the *initial* connect so N shards of one venue don't all open (and
         # therefore later all drop and reconnect) in lockstep. Shard 0 starts
         # immediately; each later shard waits idx*stagger. Reconnect spread is handled
@@ -430,6 +443,7 @@ class BaseCexAdapter(ExchangeAdapter):
                 attempt += 1
                 self._on_failure()
                 if attempt >= self._config.ws_fast_reconnect_max:
+                    now = time.monotonic()
                     if not offline:
                         # Only mark the venue offline when NO shard is connected —
                         # one shard reconnecting must not blank a venue whose other
@@ -439,14 +453,26 @@ class BaseCexAdapter(ExchangeAdapter):
                             self._on_failure(hard=True)
                         log.warning("ws_offline_slow_retry", venue=self.id, shard=idx,
                                     error=describe_exc(exc))
-                        # Fast reconnects to this WS host all failed → rotate to the next
-                        # host (mirror) before the slow-retry loop, so a geo/IP-blocked
-                        # primary is escaped instead of retried forever. With a proxy
-                        # chain configured, also fail over to the next proxy — the
-                        # egress route itself may be what is blocked.
-                        self._rotate_ws()
-                        await self._rotate_proxy(reason="ws fast-reconnect exhausted")
-                        offline = True
+                        offline, offline_since, offline_cycles = True, now, 0
+                    else:
+                        offline_cycles += 1
+                        # A shard offline for too long is partial market-data loss for its
+                        # symbol range — escalate for monitoring (throttled per shard).
+                        down_for = now - offline_since
+                        if (self._config.ws_offline_alert_sec > 0
+                                and down_for >= self._config.ws_offline_alert_sec):
+                            emit, suppressed = _ws_offline_throttle.allow((self.id, idx))
+                            if emit:
+                                log.warning("ws_shard_offline", venue=self.id, shard=idx,
+                                            offline_for_sec=round(down_for, 1),
+                                            repeats_suppressed=suppressed)
+                    # Escape a geo/IP-blocked mirror on EVERY slow-retry cycle (not just at
+                    # escalation), so a shard cannot get stuck retrying one dead host for
+                    # tens of minutes. Rotate the egress proxy less often (every 3rd cycle),
+                    # since the block is more often the WS host than the proxy.
+                    self._rotate_ws()
+                    if offline_cycles % 3 == 0:
+                        await self._rotate_proxy(reason="ws still offline")
                     await self._sleep(self._config.ws_slow_retry_interval_sec)
                     continue
                 delay = backoff_delay(

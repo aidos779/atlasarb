@@ -131,7 +131,8 @@ Two configuration surfaces:
 | `PAYMENT_WEBHOOK_SECRET` | Payment webhook verification (NFR-SEC-03) | — |
 | `PRICE_BASIC_USD` / `PRICE_PRO_USD` | Tier pricing | 19 / 79 |
 | `*_REST_URL` / `*_WS_URL` | Per-CEX official REST/WS endpoints (ARCH-2) | public endpoints |
-| `*_RPC_URLS` | Per-network CSV of ≥2 RPC providers (§2.4 failover) | empty |
+| `*_RPC_URLS` | Per-network CSV of ≥2 RPC providers (§2.4 failover). Listed URLs are tried before built-in public fallbacks; the pool then ranks by live latency. **Prod requires ≥2 paid providers first on `ETHEREUM_RPC_URLS`/`BNB_RPC_URLS`** — public nodes caused sustained `rpc_all_providers_failed` outages. | empty |
+| `ANKR_API_KEY` | Enables authenticated Ankr endpoints (`rpc.ankr.com/<chain>/<key>`). Empty → unauthenticated Ankr URLs are dropped from rotation. | empty |
 | `JUPITER_API_URL` | Jupiter quote API | public |
 | `SCANNER_CONFIG_FILE` | Path to `scanner.toml` tuning layer | `config/scanner.toml` |
 

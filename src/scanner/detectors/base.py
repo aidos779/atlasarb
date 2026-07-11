@@ -33,6 +33,12 @@ class DetectionContext:
     # Price-spread plausibility ceiling for CEX↔CEX (ticker-collision / bad-tick guard).
     # 0 disables the guard. Set from ScannerConfig.max_plausible_cex_spread_pct.
     max_plausible_cex_spread_pct: Decimal = Decimal(10)
+    # Minimum annualized funding differential for a funding candidate (§7.4 noise floor).
+    # Set from ScannerConfig.funding_min_annualized_spread.
+    funding_min_annualized_spread: Decimal = Decimal("0.05")
+    # Base assets whose ticker collides with a different token across venues — CEX↔CEX
+    # detection is skipped for them (identity-level guard). From ScannerConfig.
+    ambiguous_tickers: frozenset[str] = frozenset()
 
     def online_cex_prices(self, pair: str) -> list[tuple[str, object]]:
         out = []

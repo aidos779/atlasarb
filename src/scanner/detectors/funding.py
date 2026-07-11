@@ -15,12 +15,11 @@ from src.domain.signal import Candidate, FundingSnapshot, LegRef
 from src.scanner.detectors.base import DetectionContext, Detector
 
 _MIN_LEAD_SEC = 120  # §7.4 minimum lead time to settlement
-# A delta-neutral carry only clears entry+exit fees once the annualized differential
-# is meaningful (breakeven ~10% at default size/hold). Below this the candidate is
-# provably unprofitable, so we don't emit it — this is noise suppression, not a
-# profit-filter change (nothing that could publish is excluded). It stops BTC/ETH/SOL
-# funding from flooding the generator with tens of thousands of doomed candidates.
-_MIN_ANNUALIZED_SPREAD = Decimal("0.05")
+# Minimum annualized differential is the config-tunable ``funding_min_annualized_spread``
+# (on DetectionContext). A delta-neutral carry only clears entry+exit fees once the
+# annualized differential is meaningful; below it the candidate is provably unprofitable,
+# so we don't emit it — noise suppression that stops BTC/ETH/SOL funding from flooding the
+# generator with doomed candidates, not a profit-filter change.
 
 
 class FundingDetector(Detector):
@@ -45,7 +44,7 @@ class FundingDetector(Detector):
             return []  # not actionable before settlement
 
         annualized_spread = high.annualized() - low.annualized()
-        if annualized_spread < _MIN_ANNUALIZED_SPREAD:
+        if annualized_spread < ctx.funding_min_annualized_spread:
             return []
 
         # Reference "price" for legs = current funding rate (informational).

@@ -45,6 +45,10 @@ log = get_logger("scanner.engine")
 # identical warnings instead of emitting one per tick.
 _detector_log_throttle = LogThrottle(interval_sec=60.0)
 
+# A sustained network outage stays down across many status ticks — throttle the escalated
+# alert so it fires periodically (with a suppressed count), not every minute.
+_rpc_down_throttle = LogThrottle(interval_sec=300.0)
+
 
 class ScanningEngine:
     def __init__(
@@ -66,6 +70,7 @@ class ScanningEngine:
         self._assembler = SignalAssembler(
             config, self._cache, self._health, adapters, gas, self._priority
         )
+        self._rpc_down_since: dict[str, float] = {}  # network -> when it went fully down
         self._verified_tokens = {t.upper() for t in verified_tokens}
         # Funding scans need breadth: majors almost never clear the carry breakeven
         # (~10% annualized); alt perps regularly do. Assets without a perp on a venue
@@ -232,6 +237,9 @@ class ScanningEngine:
                 verified_tokens=self._verified_tokens,
                 max_plausible_cex_spread_pct=Decimal(
                     str(self._config.max_plausible_cex_spread_pct)),
+                funding_min_annualized_spread=Decimal(
+                    str(self._config.funding_min_annualized_spread)),
+                ambiguous_tickers=frozenset(self._config.ambiguous_tickers),
             )
             self._ctx = ctx
         return ctx
@@ -292,18 +300,7 @@ class ScanningEngine:
             1 for v in dex
             if self._health.venue_report(v, self._config.stale_dex_rpc_sec)["quote_fresh"]
         )
-        # One RPC pool per EVM network (adapters on the same network share the URL
-        # set but track health independently — report the best view per network).
-        rpc_by_network: dict[str, tuple[int, int]] = {}
-        for adapter in self._adapters.values():
-            pool = getattr(adapter, "_rpc_pool", None)
-            network = getattr(adapter, "network", None)
-            if pool is None or network is None:
-                continue
-            healthy, total = pool.healthy_count()
-            best = rpc_by_network.get(network)
-            if best is None or healthy > best[0]:
-                rpc_by_network[network] = (healthy, total)
+        rpc_by_network = self._rpc_healthy_by_network()
         rpc_healthy = sum(h for h, _ in rpc_by_network.values())
         rpc_total = sum(t for _, t in rpc_by_network.values())
         m = self._metrics
@@ -321,6 +318,64 @@ class ScanningEngine:
         prev.update(signals=m.signals_created, errors=errors_now,
                     notifications=m.notifications_sent)
         return summary
+
+    def _rpc_healthy_by_network(self) -> dict[str, tuple[int, int]]:
+        """(healthy, total) RPC providers per EVM network. Adapters on the same network
+        share the URL set but track health independently, so report the best view per
+        network — a network is only "down" when *every* adapter's pool sees zero healthy.
+        """
+        by_network: dict[str, tuple[int, int]] = {}
+        for adapter in self._adapters.values():
+            pool = getattr(adapter, "_rpc_pool", None)
+            network = getattr(adapter, "network", None)
+            if pool is None or network is None:
+                continue
+            healthy, total = pool.healthy_count()
+            best = by_network.get(network)
+            if best is None or healthy > best[0]:
+                by_network[network] = (healthy, total)
+        return by_network
+
+    def _check_rpc_network_outages(self, now: float | None = None) -> None:
+        """Escalate a *sustained* full-network RPC outage (every pool down at once — the
+        `rpc_all_providers_failed` storms) to a distinct `rpc_network_down` event once it
+        has lasted longer than ``rpc_network_down_alert_sec``, and emit `rpc_network_
+        recovered` when it clears. This is the machine-readable signal for external
+        alerting (e.g. the Telegram health-report); it does not change any existing field.
+        """
+        now = time.time() if now is None else now
+        threshold = self._config.rpc_network_down_alert_sec
+        for network, (healthy, total) in self._rpc_healthy_by_network().items():
+            if total > 0 and healthy == 0:
+                since = self._rpc_down_since.setdefault(network, now)
+                down_for = now - since
+                if down_for >= threshold:
+                    emit, suppressed = _rpc_down_throttle.allow(network, now=now)
+                    if emit:
+                        log.warning("rpc_network_down", network=network,
+                                    down_for_sec=round(down_for, 1), providers=total,
+                                    repeats_suppressed=suppressed)
+            elif network in self._rpc_down_since:
+                down_for = now - self._rpc_down_since.pop(network)
+                log.info("rpc_network_recovered", network=network,
+                         was_down_for_sec=round(down_for, 1))
+
+    def _log_dex_quote_report(self) -> None:
+        """Per-DEX-venue quote-freshness snapshot (§2.2), so a new log can tell apart the
+        two distinct failure modes behind "no DEX signals":
+          - quote_fresh=False → the venue has no fresh reserve reads (RPC starvation);
+          - quote_fresh=True but no signals → data is flowing, the arb just isn't there.
+        Emitted as one event per DEX venue at the engine_status cadence. Venues with stale
+        quotes are logged at WARNING so they stand out; fresh ones at DEBUG.
+        """
+        for venue, adapter in self._adapters.items():
+            if adapter.venue_type.value != "DEX":
+                continue
+            rep = self._health.venue_report(venue, self._config.stale_dex_rpc_sec)
+            emit = log.debug if rep["quote_fresh"] else log.warning
+            emit("dex_quote_status", venue=venue, quote_fresh=rep["quote_fresh"],
+                 quote_age_sec=rep["quote_age_sec"], discovery_age_sec=rep["discovery_age_sec"],
+                 status=rep["status"])
 
     async def _stats_loop(self) -> None:
         """Periodic observability (§17) tuned for readable logs:
@@ -341,9 +396,12 @@ class ScanningEngine:
                 break
             tick += 1
             m = self._metrics
+            # Every minute: escalate a sustained whole-network RPC outage for alerting.
+            self._check_rpc_network_outages()
             if tick % 3 == 0:
                 log.info("engine_status",
                          **self._engine_status_summary(3.0, prev_rates))
+                self._log_dex_quote_report()
             if tick % 5 == 0:
                 buckets = m.rejections_by_bucket()
                 online = sum(1 for s in self._health.all_statuses().values()
@@ -369,6 +427,9 @@ class ScanningEngine:
                     telegram_sent=m.notifications_sent,
                     reject_reasons=dict(m.rejections),
                 )
+                # Event-queue composition (§1.6): confirms the coalesced `queue_pending`
+                # is bounded and no priority tier is starving (rising oldest_age on tier 3).
+                log.info("event_queue_report", **self._event_queue.depth_report())
             # Per venue-pair funnel (§17) — the engine exposes the numbers
             # directly; no DEBUG log parsing required.
             if tick % 15 == 0:

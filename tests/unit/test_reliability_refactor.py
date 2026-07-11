@@ -181,6 +181,30 @@ def test_ranking_prefers_healthiest_provider():
     assert set(order) == {"bad", "good"}
 
 
+def test_slow_node_sinks_below_faster_peer_but_stays_in_rotation():
+    """A provider slower than the configured ceiling takes a fixed extra penalty so a
+    node under the ceiling always outranks it — even when both are slow and the relative
+    penalty alone would barely separate them. The slow node is NOT disabled: it remains
+    in rotation as a last resort so the network never goes dark just for being slow."""
+    pool = RpcProviderPool(urls=["under", "over"], fail_threshold=100, network="bnb",
+                           slow_latency_ms=2500.0)
+    for _ in range(4):
+        pool.record_success("under", latency_ms=2400)   # just under the ceiling
+        pool.record_success("over", latency_ms=3000)    # over the ceiling
+    order = pool.order()
+    assert order[0] == "under"          # under-ceiling node preferred
+    assert set(order) == {"under", "over"}  # slow node still available as backup
+
+
+def test_slow_latency_penalty_is_off_when_threshold_zero():
+    pool = RpcProviderPool(urls=["u"], fail_threshold=100, network="bnb", slow_latency_ms=0.0)
+    pool.record_success("u", latency_ms=9000)  # very slow
+    p = pool._providers[0]
+    # With the threshold disabled, rank() applies no absolute slow-node penalty.
+    assert p.rank(now=p.last_success_at, best_latency_ms=9000, slow_latency_ms=0.0) == \
+        p.rank(now=p.last_success_at, best_latency_ms=9000)
+
+
 def test_all_disabled_still_probes_one():
     pool = RpcProviderPool(urls=["u1"], fail_threshold=1, network="base")
     pool.record_failure("u1", RpcErrorKind.HTTP)

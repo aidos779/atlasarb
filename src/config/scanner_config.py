@@ -72,6 +72,12 @@ class ScannerConfig:
     # Candidates above this are dropped in the detector, BEFORE the profit pipeline.
     # Does not apply to funding/cross-chain (their "spread" is a projected carry).
     max_plausible_cex_spread_pct: float = 10.0
+    # Explicit ticker-collision denylist: base assets whose ticker maps to DIFFERENT
+    # underlying tokens across venues (no shared identity), so a CEX↔CEX "spread" on them
+    # is never a real arb. Dropped at the identity level BEFORE the spread heuristic, so a
+    # known collision (e.g. "AI") stops re-tripping the plausibility guard every tick.
+    # Seeded with collisions observed in production; extend as new ones are found.
+    ambiguous_tickers: frozenset[str] = frozenset({"AI"})
     stablecoin_crossquote_bps: float = 3.0     # §8.9 default conversion cost
 
     # ── Bridge / cross-chain (§7.5) ──
@@ -101,6 +107,10 @@ class ScannerConfig:
 
     # ── Timeouts / retries (§2, §15.2) ──
     cex_rest_timeout_sec: float = 5.0
+    # Market discovery (exchangeInfo) returns a large payload — Binance's ~700-pair
+    # response repeatedly timed out at the 5s general REST budget. Give discovery its own
+    # larger timeout so a slow-but-working listing fetch is not aborted as a failure.
+    cex_discovery_timeout_sec: float = 20.0
     dex_rpc_timeout_sec: float = 8.0
     healthcheck_timeout_sec: float = 3.0
     rest_max_attempts: int = 3
@@ -109,7 +119,14 @@ class ScannerConfig:
     ws_backoff_multiplier: float = 2.0
     ws_backoff_cap_sec: float = 30.0
     ws_backoff_jitter: float = 1.0             # full jitter → shards de-sync (no storm)
-    ws_slow_retry_interval_sec: float = 60.0
+    # Interval between reconnect attempts once a shard has escalated to the offline state.
+    # Kept short (and paired with per-cycle host/proxy rotation) so an offline shard is
+    # recovered in tens of seconds, not the tens of minutes seen when it stuck on a single
+    # blocked mirror.
+    ws_slow_retry_interval_sec: float = 30.0
+    # A single shard offline longer than this is escalated to a `ws_shard_offline` alert
+    # (partial market-data loss for that venue's symbol range). 0 disables the alert.
+    ws_offline_alert_sec: float = 300.0
     ws_heartbeat_timeout_sec: float = 20.0
     ws_ping_interval_sec: float = 15.0         # app-level keepalive ping cadence (§2.3)
     ws_idle_timeout_sec: float = 60.0          # no inbound frame this long -> reconnect
@@ -127,6 +144,11 @@ class ScannerConfig:
     rpc_provider_fail_threshold: int = 5
     rpc_provider_cooldown_sec: float = 20.0
     rpc_provider_cooldown_max_sec: float = 300.0
+    # A provider whose EWMA latency exceeds this is de-prioritized (sunk below faster
+    # peers) but NOT disabled — it stays as a last-resort backup so the network never goes
+    # dark just because every node is slow. Prod logs showed public nodes at 2-7s; a fast
+    # paid endpoint should always outrank them. 0 disables the extra penalty.
+    rpc_max_healthy_latency_ms: float = 2500.0
 
     # ── Health / staleness (§2.2, §4.4, §16) ──
     stale_cex_ws_sec: float = 15.0
@@ -135,6 +157,10 @@ class ScannerConfig:
     # must not flip a venue to Maintenance. 30s caused observed DEX flapping — 60s
     # (≈ several poll cycles) eliminated it while still catching a truly dead feed.
     stale_dex_rpc_sec: float = 60.0
+    # A whole EVM network with zero healthy RPC providers for longer than this is a
+    # sustained outage (all pools failing at once — the observed `rpc_all_providers_failed`
+    # storms). Surface it as an escalated `rpc_network_down` event for external alerting.
+    rpc_network_down_alert_sec: float = 60.0
     active_healthcheck_interval_sec: float = 10.0
     health_recovery_consecutive: int = 3       # §14.2 N consecutive
     max_age_cex_price_sec: float = 10.0        # §16
@@ -144,6 +170,11 @@ class ScannerConfig:
     # Rolling funding-rate samples kept per (venue, base) for the funding confidence
     # stability/volatility factor (§11.5).
     funding_history_window: int = 20
+    # Minimum annualized funding-rate differential for a funding candidate to be emitted
+    # (noise floor — below this the delta-neutral carry cannot clear entry+exit fees at
+    # the default size/hold). 0.05 = 5% annualized. Tunable by operators without touching
+    # code; users still apply their own per-alert min_profit filter on top.
+    funding_min_annualized_spread: float = 0.05
 
     # ── Scheduling (§1.1, §1.6, §16) ──
     reconciliation_interval_sec: float = 1.0   # safety-net max every 1s

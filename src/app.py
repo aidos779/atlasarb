@@ -23,7 +23,9 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import ExceptionTypeFilter
+from aiogram.types import BotCommand, ErrorEvent
 
 from src.bot.context import BotContext
 from src.bot.handlers import register_handlers
@@ -67,6 +69,23 @@ _COMMANDS = [
     BotCommand(command="help", description="Help"),
     BotCommand(command="cancel", description="Cancel current input"),
 ]
+
+
+# Callback-query answers that lose the 15s Telegram window (a user taps a stale button,
+# or the handler was briefly slow) raise TelegramBadRequest "query is too old…". This is a
+# benign timing condition, not a bug — swallow it as a structured warning instead of
+# letting the raw traceback flood the logs. Any other TelegramBadRequest is re-raised so
+# genuine API misuse still surfaces.
+_CALLBACK_EXPIRED_MARKERS = ("query is too old", "query id is invalid",
+                             "query is invalid")
+
+
+async def _on_telegram_bad_request(event: ErrorEvent) -> bool:
+    msg = str(event.exception).lower()
+    if any(marker in msg for marker in _CALLBACK_EXPIRED_MARKERS):
+        log.warning("callback_query_expired", error=str(event.exception))
+        return True  # handled — no traceback
+    raise event.exception  # not ours — let aiogram log it as before
 
 
 def _environment_config_layer(environment: str) -> dict:
@@ -166,6 +185,8 @@ class Application:
             observer.middleware(ctx_mw)
             observer.middleware(throttle)
         register_handlers(self.dp)
+        self.dp.errors.register(_on_telegram_bad_request,
+                                ExceptionTypeFilter(TelegramBadRequest))
         self.dp.workflow_data.update(ctx=self.ctx, bot=self.bot)
 
     async def run(self) -> None:

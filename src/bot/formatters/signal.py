@@ -63,7 +63,7 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
         f"Detected: {format_datetime(signal.timestamp, tz)} · Active {signal.age_sec()}s\n\n"
         f"Buy on {html.escape(signal.buy_exchange)} @ {buy_price}\n"
         f"Sell on {html.escape(signal.sell_exchange)} @ {sell_price}\n\n"
-        f"Gross Spread: {format_pct(signal.spread_pct)} · Confidence: {signal.confidence_score}%"
+        f"{_spread_line(signal)} · Confidence: {signal.confidence_score}%"
     )
 
     # ── Profit Breakdown (§10.2) ──
@@ -71,9 +71,13 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
     if bd is not None:
         net_usd = await format_money(fx, bd.net_profit_usd, cur)
         network_fees = bd.withdrawal_fees_usd + bd.gas_fees_usd + bd.bridge_fees_usd
+        # For funding, gross_spread_pct is the ANNUALIZED rate differential, not a price
+        # gross to be netted against fees — label it so it is never read as the profit.
+        spread_label = ("Annualized funding" if signal.arb_type == ArbitrageType.FUNDING
+                        else "Gross Spread")
         parts.append(
             "<b>Profit Breakdown</b>\n"
-            f"Gross Spread: {format_pct(bd.gross_spread_pct)}\n"
+            f"{spread_label}: {format_pct(bd.gross_spread_pct)}\n"
             f"Trading fees: −{await format_money(fx, bd.trading_fees_usd, cur)}\n"
             f"Withdrawal/network: −{await format_money(fx, network_fees, cur)}\n"
             f"Est. slippage: −{await format_money(fx, bd.slippage_cost_usd, cur)}\n"
@@ -112,6 +116,17 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
         parts.append(f"{t('details.locked', lang)}\n{t('details.unlock', lang)}")
 
     return "\n\n".join(parts)
+
+
+def _spread_line(signal: Signal) -> str:
+    """Overview spread line. For a funding carry, ``spread_pct`` is the ANNUALIZED rate
+    differential (can be tens of %), which is NOT the profit — so it is labelled as such
+    and shown alongside the realized net-per-hold, to never be mistaken for the return.
+    Price arbs keep the familiar single "Gross Spread"."""
+    if signal.arb_type == ArbitrageType.FUNDING:
+        return (f"Annualized funding: {format_pct(signal.spread_pct)} · "
+                f"Net/hold: {format_pct(signal.net_profit_pct)}")
+    return f"Gross Spread: {format_pct(signal.spread_pct)}"
 
 
 def _risk_explanation(signal: Signal) -> str:

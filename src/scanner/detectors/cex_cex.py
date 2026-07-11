@@ -25,6 +25,12 @@ class CexCexDetector(Detector):
 
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:
         pair = f"{base_asset}/{quote_asset}"
+        # Identity-level guard: a ticker known to map to DIFFERENT tokens across venues is
+        # never a real CEX↔CEX arb. Skip it silently up front so it never reaches — and
+        # re-trips every tick — the spread-plausibility heuristic below (the source of the
+        # repeated `cex_cex_spread_implausible` warnings for "AI" in the prod log).
+        if base_asset in ctx.ambiguous_tickers:
+            return []
         prices = ctx.online_cex_prices(pair)
         if len(prices) < 2:
             return []
