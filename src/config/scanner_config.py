@@ -150,6 +150,18 @@ class ScannerConfig:
     rpc_provider_fail_threshold: int = 5
     rpc_provider_cooldown_sec: float = 20.0
     rpc_provider_cooldown_max_sec: float = 300.0
+    # Hedged failover (§2.4). A single rpc_call fans out to `rpc_hedge_factor` healthy
+    # providers at once (racing; first good result wins, the rest are cancelled) so one
+    # slow/timing-out endpoint cannot set the call's latency floor. It tries at most
+    # `rpc_max_providers_per_call` providers before giving up, bounding the worst case to
+    # ceil(max/hedge) x dex_rpc_timeout_sec regardless of how many providers are configured
+    # — critical because the notification consumer shares this event loop, and with ~10
+    # free ETH endpoints a strictly-sequential perbор could block it for tens of seconds
+    # during a degradation onset (before failing providers accumulate enough strikes to be
+    # cooled down and skipped). Hedge=2 keeps the extra request volume on rate-limited free
+    # nodes modest; a pair of reliable paid endpoints makes the fastest win almost always.
+    rpc_hedge_factor: int = 2
+    rpc_max_providers_per_call: int = 6
     # A provider whose EWMA latency exceeds this is de-prioritized (sunk below faster
     # peers) but NOT disabled — it stays as a last-resort backup so the network never goes
     # dark just because every node is slow. Prod logs showed public nodes at 2-7s; a fast

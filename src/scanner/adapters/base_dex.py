@@ -7,6 +7,7 @@ verified-token-list gated (§3.4) — the curated pool list is engine *data* inp
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import abstractmethod
 from decimal import Decimal
@@ -28,14 +29,6 @@ log = get_logger("adapter.dex")
 # All-providers-down is worth one aggregated WARNING per network per window, not one
 # per call — a fully rate-limited host would otherwise emit it every poll cycle.
 _exhausted_log_throttle = LogThrottle(interval_sec=60.0)
-
-
-class _RpcFailure(Exception):
-    """Internal marker carrying the classified failure kind for the provider pool."""
-
-    def __init__(self, kind: RpcErrorKind, message: str) -> None:
-        super().__init__(message)
-        self.kind = kind
 
 
 # Substrings that identify a permanent authentication failure in a response body /
@@ -153,70 +146,93 @@ class BaseDexAdapter(ExchangeAdapter):
     def withdrawals_enabled(self, base_asset: str, network: str | None) -> bool:
         return True
 
-    # ── JSON-RPC with health-aware failover (§2.4) ──
+    # ── JSON-RPC with hedged, health-aware failover (§2.4) ──
+    async def _rpc_attempt(
+        self, url: str, payload: dict,
+    ) -> tuple[object | None, RpcErrorKind | None, float, str | None]:
+        """One request to one provider. Pure w.r.t. the pool — the caller records the
+        outcome so a hedged batch never double-counts or records a cancelled racer.
+        Returns (result, failure_kind, latency_ms, detail); result is not-None on success.
+        """
+        await self._limiter.acquire()
+        started = time.perf_counter()
+        try:
+            async with self._session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    # 401 (and 403 with an auth body) means the endpoint needs a key we
+                    # don't have — a permanent failure to retire, not retry. 429 is
+                    # throttling; other non-200 is a generic HTTP failure.
+                    if resp.status == 401 or (resp.status == 403 and _auth_body(
+                            await _safe_text(resp))):
+                        return (None, RpcErrorKind.UNAUTHORIZED, 0.0,
+                                f"http {resp.status} (auth required)")
+                    kind = (RpcErrorKind.RATE_LIMIT if resp.status == 429
+                            else RpcErrorKind.HTTP)
+                    return None, kind, 0.0, f"http {resp.status}"
+                data = await resp.json(content_type=None)
+                if "error" in data:
+                    err = data["error"]
+                    # Some providers return 200 with a JSON-RPC auth error instead of 401.
+                    if _auth_body(str(err)):
+                        return None, RpcErrorKind.UNAUTHORIZED, 0.0, str(err)
+                    return None, RpcErrorKind.RPC_ERROR, 0.0, str(err)
+                result = data.get("result")
+                if result is None:
+                    # Some public nodes answer 200 with a null result when degraded —
+                    # treat as a failure and fail over rather than surfacing a fake outage.
+                    return None, RpcErrorKind.RPC_ERROR, 0.0, "null result"
+                return result, None, (time.perf_counter() - started) * 1000, None
+        except (TimeoutError, aiohttp.ServerTimeoutError):
+            return None, RpcErrorKind.TIMEOUT, 0.0, "timeout"
+        except asyncio.CancelledError:
+            raise  # a losing racer was cancelled after a peer won — not a provider fault
+        except Exception as exc:  # noqa: BLE001 — connection reset / DNS / TLS
+            return None, RpcErrorKind.HTTP, 0.0, describe_exc(exc)
+
     async def rpc_call(self, method: str, params: list) -> object | None:
         if not self._rpc_urls or self._session is None:
             return None
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        # Try healthy providers first (round-robin), disabled ones only as probes. A
-        # dead endpoint is skipped entirely, so discovery keeps working off the healthy
-        # ones instead of burning an attempt on the same 403 every cycle.
-        order = self._rpc_pool.order()
+        # Health-ranked, cooldown-aware order: disabled providers are already excluded
+        # (see RpcProviderPool.order), so this is the set worth trying now, best-first.
+        order = self._rpc_pool.order()[:max(1, self._config.rpc_max_providers_per_call)]
+        hedge = max(1, self._config.rpc_hedge_factor)
         last_err: str | None = None
-        for url in order:
-            await self._limiter.acquire()
-            started = time.perf_counter()
+        # Fan out in hedged batches: race `hedge` providers at once so a single slow node
+        # can't hold the whole call hostage. First good result wins and cancels the rest;
+        # failures are recorded and we fall through to the next batch. Worst case is
+        # ceil(len(order)/hedge) x dex_rpc_timeout_sec, not len(order) x timeout.
+        for start in range(0, len(order), hedge):
+            batch = order[start:start + hedge]
+            tasks = {asyncio.create_task(self._rpc_attempt(u, payload)): u for u in batch}
+            pending = set(tasks)
+            winner: object | None = None
             try:
-                async with self._session.post(url, json=payload) as resp:
-                    if resp.status != 200:
-                        # Classify so the health log names the real cause and each kind
-                        # backs off appropriately. 401 (and 403 with an auth body) means
-                        # the endpoint needs a key we don't have — a permanent failure
-                        # that must be retired, not retried (e.g. public Ankr endpoints).
-                        # 429 is throttling; other non-200 is a generic HTTP failure.
-                        if resp.status == 401 or (resp.status == 403 and _auth_body(
-                                await _safe_text(resp))):
-                            raise _RpcFailure(RpcErrorKind.UNAUTHORIZED,
-                                              f"http {resp.status} (auth required)")
-                        kind = (RpcErrorKind.RATE_LIMIT if resp.status == 429
-                                else RpcErrorKind.HTTP)
-                        raise _RpcFailure(kind, f"http {resp.status}")
-                    data = await resp.json(content_type=None)
-                    if "error" in data:
-                        err = data["error"]
-                        # Some providers return 200 with a JSON-RPC auth error instead
-                        # of 401 — treat those as permanent too.
-                        if _auth_body(str(err)):
-                            raise _RpcFailure(RpcErrorKind.UNAUTHORIZED, str(err))
-                        raise _RpcFailure(RpcErrorKind.RPC_ERROR, str(err))
-                    result = data.get("result")
-                    if result is None:
-                        # Some public nodes answer 200 with a null result when degraded.
-                        # Treat as a provider failure and fail over instead of returning
-                        # None (which would look like an outage to the caller).
-                        raise _RpcFailure(RpcErrorKind.RPC_ERROR, "null result")
-                    self._rpc_pool.record_success(
-                        url, latency_ms=(time.perf_counter() - started) * 1000)
-                    return result
-            except _RpcFailure as exc:
-                self._rpc_pool.record_failure(url, exc.kind)
-                last_err = describe_exc(exc)
-                log.debug("rpc_failover", network=self.network, url=url,
-                          kind=exc.kind.value, error=last_err)
-            except (TimeoutError, aiohttp.ServerTimeoutError):
-                self._rpc_pool.record_failure(url, RpcErrorKind.TIMEOUT)
-                last_err = "timeout"
-                log.debug("rpc_failover", network=self.network, url=url,
-                          kind=RpcErrorKind.TIMEOUT.value, error=last_err)
-            except Exception as exc:  # noqa: BLE001 — connection reset / DNS / TLS
-                self._rpc_pool.record_failure(url, RpcErrorKind.HTTP)
-                last_err = describe_exc(exc)
-                log.debug("rpc_failover", network=self.network, url=url,
-                          kind=RpcErrorKind.HTTP.value, error=last_err)
-        # Every provider tried this call failed — log at WARNING (throttled per network)
-        # with the full per-provider health snapshot so production shows exactly which
-        # endpoints are down and why, instead of a mute None that only surfaces later
-        # as "API Offline".
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        url = tasks[task]
+                        result, kind, latency, detail = task.result()
+                        if result is not None:
+                            self._rpc_pool.record_success(url, latency_ms=latency)
+                            winner = result
+                            break
+                        self._rpc_pool.record_failure(url, kind)  # type: ignore[arg-type]
+                        last_err = detail
+                        log.debug("rpc_failover", network=self.network, url=url,
+                                  kind=kind.value if kind else "?", error=detail)
+                    if winner is not None:
+                        break
+            finally:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+            if winner is not None:
+                return winner
+        # Every provider tried this call failed — WARNING (throttled per network) with the
+        # full per-provider health snapshot so prod shows exactly which endpoints are down.
         emit, suppressed = _exhausted_log_throttle.allow(self.network)
         if emit:
             log.warning("rpc_all_providers_failed", venue=getattr(self, "id", None),
