@@ -111,7 +111,13 @@ class ScannerConfig:
     # response repeatedly timed out at the 5s general REST budget. Give discovery its own
     # larger timeout so a slow-but-working listing fetch is not aborted as a failure.
     cex_discovery_timeout_sec: float = 20.0
-    dex_rpc_timeout_sec: float = 8.0
+    # Per-provider RPC budget. rpc_call fails over across providers *sequentially*, so a
+    # network whose endpoints all time out costs up to N x this value on a single call.
+    # Kept at 5s (not 8s) so a fully-degraded network exhausts its failover chain fast
+    # instead of stacking into tens of seconds and starving co-hosted loop work (the
+    # notification consumer shares this event loop). 5s still clears a healthy mainnet
+    # eth_call comfortably.
+    dex_rpc_timeout_sec: float = 5.0
     healthcheck_timeout_sec: float = 3.0
     rest_max_attempts: int = 3
     ws_fast_reconnect_max: int = 6             # §2.3
