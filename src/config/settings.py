@@ -82,6 +82,12 @@ _ANKR_CHAIN: dict[str, str] = {
     "base": "base", "polygon": "polygon", "solana": "solana",
 }
 
+# Alchemy per-network subdomain — used to build an authenticated endpoint from ALCHEMY_API_KEY.
+_ALCHEMY_SUBDOMAIN: dict[str, str] = {
+    "ethereum": "eth-mainnet", "bnb": "bnb-mainnet", "arbitrum": "arb-mainnet",
+    "optimism": "opt-mainnet", "base": "base-mainnet", "polygon": "polygon-mainnet",
+}
+
 
 def _split_csv(value: str | list[str] | None) -> list[str]:
     if not value:
@@ -181,10 +187,25 @@ class Settings(BaseSettings):
     solana_rpc_urls: list[str] = Field(default_factory=list)
     jupiter_api_url: str = "https://lite-api.jup.ag/swap/v1"
 
+    # ── Paid / authenticated RPC providers (primary tier) ──
+    # When configured these are placed FIRST in the pool and marked as the primary tier
+    # (see rpc_primary_urls_for): the health-scored rotation prefers them over the public
+    # fallback nodes and only drops to the free endpoints when every primary is unhealthy.
+    # This is the fix for the prod "all public ETH/BNB providers rate-limited at once"
+    # storms (rpc_all_providers_failed) — a reliable authenticated endpoint should carry
+    # normal traffic while the public list stays as failover only.
+    #
+    # ALCHEMY_API_KEY builds https://<net>.g.alchemy.com/v2/<key> for each supported net.
+    # QUICKNODE_*_URL are full, token-bearing endpoint URLs (QuickNode issues a distinct
+    # host per network/account, so they cannot be derived from a bare key).
+    alchemy_api_key: str = ""
+    quicknode_ethereum_url: str = ""
+    quicknode_bnb_url: str = ""
+
     # Optional Ankr API key. Public unauthenticated Ankr endpoints (rpc.ankr.com/<chain>)
-    # now return 401/Unauthorized and are dropped from the pool. With a key set, they are
-    # rewritten to the authenticated form (rpc.ankr.com/<chain>/<key>); without one, Ankr
-    # is skipped entirely rather than retried forever.
+    # now return 401/Unauthorized and are dropped from the pool. With a key set, an
+    # authenticated Ankr endpoint (rpc.ankr.com/<chain>/<key>) is added to the primary
+    # tier; without one, Ankr is skipped entirely rather than retried forever.
     ankr_api_key: str = ""
 
     scanner_config_file: str = "config/scanner.toml"
@@ -225,6 +246,32 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
 
+    def _primary_rpc_urls(self, network: str) -> list[str]:
+        """Paid/authenticated primary-tier endpoints for a network, highest-priority first.
+
+        Empty unless a paid provider is configured — so a deployment with no keys keeps the
+        pre-existing public-only behaviour. QuickNode (an explicit token-bearing URL) ranks
+        ahead of Alchemy, then authenticated Ankr, purely as a stable default ordering; the
+        pool's health scoring still routes traffic to whichever primary is actually fastest.
+        """
+        net = network.lower()
+        urls: list[str] = []
+        quicknode = {"ethereum": self.quicknode_ethereum_url,
+                     "bnb": self.quicknode_bnb_url}.get(net, "")
+        if quicknode.strip():
+            urls.append(quicknode.strip())
+        if self.alchemy_api_key and net in _ALCHEMY_SUBDOMAIN:
+            urls.append(f"https://{_ALCHEMY_SUBDOMAIN[net]}.g.alchemy.com/v2/"
+                        f"{self.alchemy_api_key}")
+        if self.ankr_api_key and net in _ANKR_CHAIN:
+            urls.append(f"https://rpc.ankr.com/{_ANKR_CHAIN[net]}/{self.ankr_api_key}")
+        # Dedupe defensively while preserving priority order.
+        deduped: list[str] = []
+        for u in urls:
+            if u not in deduped:
+                deduped.append(u)
+        return deduped
+
     def rpc_urls_for(self, network: str) -> list[str]:
         mapping = {
             "ethereum": self.ethereum_rpc_urls,
@@ -237,16 +284,24 @@ class Settings(BaseSettings):
         }
         net = network.lower()
         urls: list[str] = []
-        # Append extra public fallbacks (deduped, preserving configured priority). On a
-        # rate-limited/blocked production host the configured providers can all 429/403 at
-        # once — the Ethereum-DEX "API Offline" symptom — so the failover chain must have
-        # independent providers to rotate to. rpc_call still tries them in order and the
-        # token bucket bounds the rate.
-        for url in [*mapping.get(net, []), *_EXTRA_FALLBACK_RPCS.get(net, ())]:
+        # Order = paid primaries first, then operator-configured nodes, then the extra public
+        # fallbacks (all deduped, priority preserved). On a rate-limited/blocked production
+        # host the public providers can all 429/403 at once — the Ethereum-DEX "API Offline"
+        # symptom — so the primaries carry traffic and the public list is failover only.
+        # rpc_call still tries them best-first and the token bucket bounds the rate.
+        for url in [*self._primary_rpc_urls(net), *mapping.get(net, []),
+                    *_EXTRA_FALLBACK_RPCS.get(net, ())]:
             resolved = self._resolve_ankr(url, net)
             if resolved is not None and resolved not in urls:
                 urls.append(resolved)
         return urls
+
+    def rpc_primary_urls_for(self, network: str) -> set[str]:
+        """The subset of rpc_urls_for(network) that is a paid/authenticated primary — the
+        pool marks these tier 0 so they are preferred over the public fallback nodes."""
+        net = network.lower()
+        return {r for u in self._primary_rpc_urls(net)
+                if (r := self._resolve_ankr(u, net)) is not None}
 
     def _resolve_ankr(self, url: str, network: str) -> str | None:
         """Auth-aware Ankr handling. A public ``rpc.ankr.com/<chain>`` endpoint is

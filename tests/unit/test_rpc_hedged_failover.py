@@ -72,7 +72,8 @@ class _StubPool:
 
 def _adapter(order, handlers, **cfg_kw):
     cfg = ScannerConfig(**cfg_kw)
-    settings = SimpleNamespace(rpc_urls_for=lambda net: list(order))
+    settings = SimpleNamespace(rpc_urls_for=lambda net: list(order),
+                               rpc_primary_urls_for=lambda net: set())
     a = _Dex(settings, cfg, sink=SimpleNamespace(), network="ethereum")
     a._session = _FakeSession(handlers)
     a._rpc_pool = _StubPool(order)

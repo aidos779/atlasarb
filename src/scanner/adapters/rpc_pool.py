@@ -59,6 +59,7 @@ _HARD_KINDS = frozenset({RpcErrorKind.HTTP, RpcErrorKind.RATE_LIMIT, RpcErrorKin
 @dataclass
 class _Provider:
     url: str
+    tier: int = 1               # 0 = paid/primary (preferred), 1 = public fallback
     score: float = 1.0          # EWMA success rate in [0, 1]
     latency_ms: float = 0.0     # EWMA of successful-call latency
     timeout_rate: float = 0.0   # EWMA of "was this failure a timeout?" in [0, 1]
@@ -129,11 +130,15 @@ class RpcProviderPool:
     slow_latency_ms: float = 0.0    # de-prioritize (don't disable) nodes slower than this
     # Consecutive hard failures before a provider is retired permanently (0 = never).
     permanent_fail_threshold: int = 0
+    # URLs to treat as the paid/primary tier (preferred over public fallback nodes).
+    primary_urls: set[str] = field(default_factory=set)
     _providers: list[_Provider] = field(default_factory=list)
     _cursor: int = 0
 
     def __post_init__(self) -> None:
-        self._providers = [_Provider(u) for u in self.urls]
+        self._providers = [
+            _Provider(u, tier=0 if u in self.primary_urls else 1) for u in self.urls
+        ]
 
     def update_config(self, fail_threshold: int, cooldown_base: float,
                       cooldown_max: float, slow_latency_ms: float | None = None,
@@ -166,16 +171,20 @@ class RpcProviderPool:
         if healthy:
             best_latency = min((p.latency_ms for p in healthy if p.latency_ms > 0),
                                default=0.0)
-            # Coarse rank buckets keep round-robin spread among near-equal providers
-            # while a genuinely slower/unhealthier endpoint sinks below solid ones.
-            healthy.sort(key=lambda p: round(p.rank(now, best_latency, self.slow_latency_ms), 1),
-                         reverse=True)
+            # Tier first (all healthy paid primaries before any public fallback), then a
+            # coarse rank bucket keeps round-robin spread among near-equal providers while a
+            # slower/unhealthier endpoint sinks below solid ones within the same tier. A
+            # primary is only skipped when it is unhealthy — then it is simply absent here
+            # and the fallbacks take over automatically.
+            healthy.sort(key=lambda p: (
+                p.tier, -round(p.rank(now, best_latency, self.slow_latency_ms), 1)))
             return [p.url for p in healthy]
-        # All open → probe the non-permanent one closest to recovery so we never block.
+        # All open → probe the non-permanent one closest to recovery so we never block,
+        # preferring a primary at equal recovery time so paid capacity is re-tried first.
         probes = [p for p in self._providers if not p.permanent]
         if not probes:
             return []  # every provider permanently retired — nothing to try
-        soonest = min(probes, key=lambda p: p.disabled_until)
+        soonest = min(probes, key=lambda p: (p.disabled_until, p.tier))
         return [soonest.url]
 
     def record_success(self, url: str, latency_ms: float = 0.0) -> None:

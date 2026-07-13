@@ -277,3 +277,53 @@ def test_ankr_resolution_requires_key():
     # An endpoint that already carries a key is left untouched.
     assert keyed._resolve_ankr("https://rpc.ankr.com/eth/OTHER", "ethereum") == \
         "https://rpc.ankr.com/eth/OTHER"
+
+
+def test_no_paid_keys_keeps_public_only_behaviour():
+    """A deployment with no paid keys has an empty primary tier — pool ordering is
+    unchanged from the public-only baseline."""
+    s = Settings(ethereum_rpc_urls="https://eth.example")
+    assert s._primary_rpc_urls("ethereum") == []
+    assert s.rpc_primary_urls_for("ethereum") == set()
+    assert s.rpc_urls_for("ethereum")[0] == "https://eth.example"
+
+
+def test_paid_providers_lead_the_pool_and_are_marked_primary():
+    s = Settings(
+        alchemy_api_key="AKEY",
+        quicknode_ethereum_url="https://name.quiknode.pro/TOKEN/",
+        ankr_api_key="ANKEY",
+        ethereum_rpc_urls="https://eth.public",
+    )
+    urls = s.rpc_urls_for("ethereum")
+    # QuickNode, then Alchemy, then authenticated Ankr — all ahead of any public node.
+    assert urls[:3] == [
+        "https://name.quiknode.pro/TOKEN/",
+        "https://eth-mainnet.g.alchemy.com/v2/AKEY",
+        "https://rpc.ankr.com/eth/ANKEY",
+    ]
+    assert "https://eth.public" in urls[3:]
+    # The primary set is exactly the three paid endpoints (used to tier the pool).
+    assert s.rpc_primary_urls_for("ethereum") == set(urls[:3])
+
+
+def test_alchemy_bnb_endpoint_built_for_bnb():
+    s = Settings(alchemy_api_key="AKEY")
+    assert s.rpc_urls_for("bnb")[0] == "https://bnb-mainnet.g.alchemy.com/v2/AKEY"
+
+
+def test_pool_prefers_primary_tier_then_falls_back_when_unhealthy():
+    """A healthy primary is always tried before a public fallback; when the primary is
+    disabled the fallback takes over automatically, and the recovered primary leads again."""
+    pool = RpcProviderPool(urls=["paid", "public"], fail_threshold=2, network="ethereum",
+                           primary_urls={"paid"})
+    pool.record_success("paid", latency_ms=200)
+    pool.record_success("public", latency_ms=50)   # faster, but a fallback
+    assert pool.order()[0] == "paid"               # tier wins over raw latency
+    # Primary goes down → fallback serves alone.
+    for _ in range(2):
+        pool.record_failure("paid", RpcErrorKind.TIMEOUT)
+    assert pool.order() == ["public"]
+    # Primary recovers → it leads again.
+    pool.record_success("paid", latency_ms=200)
+    assert pool.order()[0] == "paid"
