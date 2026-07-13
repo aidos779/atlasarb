@@ -1,7 +1,10 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from src.database.repositories.favorites_repo import FavoritesRepository
 from src.database.repositories.history_repo import HistoryRepository
+from src.database.repositories.misc_repos import NotificationRepository
 from src.database.repositories.user_repo import UserRepository
 from src.domain.enums import Currency, Language, UserRole
 from src.domain.signal import Signal
@@ -69,3 +72,21 @@ async def test_get_or_create_is_idempotent(database):
         again = await UserRepository(s).get(77)
     assert again is not None
     assert again.subscription is not None and again.settings is not None
+
+
+async def test_set_cooldown_is_idempotent_upsert(database):
+    """Per-user alert cooldown UPSERT (uq_alert_cooldown): the delayed per-tier passes
+    (0/10/60s) and concurrent signals for the same (user, dedup_key) must never raise a
+    duplicate-key IntegrityError — the second writer updates the row instead. This is the
+    prod user_eval_error / 'duplicate key value violates uq_alert_cooldown' defect."""
+    async with database.session() as s:
+        await UserRepository(s).get_or_create(88, "carol", "Carol")
+    until = datetime.now(UTC) + timedelta(seconds=60)
+    # Two writes to the SAME (user_id, dedup_key) — the pre-fix read-then-insert raced here.
+    for net in (0.31, 0.42):
+        async with database.session() as s:
+            await NotificationRepository(s).set_cooldown(88, "ETH/USDT|binance|okx", net, until)
+    async with database.session() as s:
+        row = await NotificationRepository(s).get_cooldown(88, "ETH/USDT|binance|okx")
+    assert row is not None
+    assert float(row.last_net_pct) == pytest.approx(0.42)  # last writer won, no error
