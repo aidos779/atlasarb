@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import random
 import time
 from abc import abstractmethod
 from decimal import Decimal
@@ -548,12 +549,25 @@ class BaseCexAdapter(ExchangeAdapter):
         ping_interval = self._config.ws_ping_interval_sec
         idle_limit = max(self._config.ws_idle_timeout_sec, ping_interval * 2)
         last_rx = last_ping = loop.time()
+        # Planned-recycle deadline: proactively reconnect before the server's own forced
+        # close (Binance's 24h limit → 1006 abnormal close). Jittered to 90–100% of the cap
+        # so shards recycle at different times rather than in lockstep. 0 = never.
+        recycle_after = self._config.ws_max_connection_sec
+        recycle_at = (loop.time() + recycle_after * (0.9 + 0.1 * random.random())
+                      if recycle_after > 0 else None)
         while not self._stop.is_set():
             try:
                 msg = await ws.receive(timeout=ping_interval)
             except TimeoutError:
                 msg = None  # idle tick — fall through to heartbeat/idle checks
             now = loop.time()
+            # Clean planned recycle: return (don't raise) so the shard loop reconnects
+            # immediately with a reset budget and NO recorded failure — this is a healthy
+            # rotation, not an error.
+            if recycle_at is not None and now >= recycle_at:
+                log.debug("ws_planned_recycle", venue=self.id, shard=idx,
+                          age_sec=round(now - (recycle_at - recycle_after), 1))
+                return
             if msg is not None:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     last_rx = now

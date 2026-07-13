@@ -123,3 +123,60 @@ async def test_offline_rotates_host_every_cycle_and_alerts():
     # Escalated exactly once, and the sustained-offline alert fired.
     assert sum(1 for e in logs if e["event"] == "ws_offline_slow_retry") == 1
     assert any(e["event"] == "ws_shard_offline" for e in logs)
+
+
+# ── P2.6: proactive connection recycle before the server's forced 24h close ──
+class _IdleWs:
+    """A WS that only ever times out (idle) — never delivers data or closes itself."""
+    closed = False
+
+    async def receive(self, **_kw):  # accepts the timeout kwarg base_cex passes
+        raise TimeoutError
+
+    async def send_json(self, x):
+        pass
+
+    async def send_str(self, x):
+        pass
+
+
+class _StepLoop:
+    """Fake event loop whose clock jumps `step` seconds on every .time() call, so a few
+    receive iterations deterministically cross a small recycle deadline."""
+    def __init__(self, step: float):
+        self._t = 0.0
+        self._step = step
+
+    def time(self) -> float:
+        self._t += self._step
+        return self._t
+
+
+def _recv_adapter(max_conn_sec: float):
+    cfg = ScannerConfig()
+    cfg.ws_max_connection_sec = max_conn_sec
+    cfg.ws_idle_timeout_sec = 60.0
+    a = _Adapter(Settings(), cfg, sink=None, rest_url="http://x", ws_url="ws://x",
+                 rate_per_sec=100, burst=100)
+    a._shard_connected = [False]
+    return a
+
+
+async def test_planned_recycle_returns_cleanly_not_as_failure():
+    """Once a connection passes ws_max_connection_sec the receive loop RETURNS (so the
+    shard loop reconnects with a reset budget) instead of raising — a healthy rotation that
+    pre-empts Binance's 24h server-forced 1006 close, recorded as no failure."""
+    a = _recv_adapter(max_conn_sec=50.0)  # tiny cap → crossed within a few clock steps
+    result = await asyncio.wait_for(
+        a._ws_receive_loop(_IdleWs(), _StepLoop(step=100.0), idx=0), timeout=1.0)
+    assert result is None  # clean return, no ConnectionError raised
+
+
+async def test_recycle_disabled_falls_through_to_idle_reconnect():
+    """With recycling disabled (0) the same idle stream instead trips the idle-timeout
+    guard and raises to trigger a normal reconnect — proving the clean return above is the
+    recycle path, not idle detection."""
+    a = _recv_adapter(max_conn_sec=0.0)
+    with pytest.raises(ConnectionError):
+        await asyncio.wait_for(
+            a._ws_receive_loop(_IdleWs(), _StepLoop(step=100.0), idx=0), timeout=1.0)

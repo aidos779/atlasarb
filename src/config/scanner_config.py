@@ -136,6 +136,13 @@ class ScannerConfig:
     ws_heartbeat_timeout_sec: float = 20.0
     ws_ping_interval_sec: float = 15.0         # app-level keepalive ping cadence (§2.3)
     ws_idle_timeout_sec: float = 60.0          # no inbound frame this long -> reconnect
+    # Proactively recycle a WS connection before the server force-closes it. Binance closes
+    # any single stream connection at the 24h mark (docs: "expect to be disconnected at the
+    # 24 hour mark"), which arrives as a 1006 ABNORMAL_CLOSURE + ClientConnectionResetError
+    # ("Cannot write to closing transport") — exactly the churn in the prod logs. Recycling
+    # at ~23h (jittered per shard so they don't resync) turns that server-initiated abrupt
+    # close into a clean, planned reconnect that never records a failure. 0 disables.
+    ws_max_connection_sec: float = 82800.0     # 23h
     # Per-shard connect/reconnect stagger (§2.3): shards open `idx * stagger` apart and
     # each reconnect adds up to `stagger` of extra random delay, so a common upstream
     # drop does not turn into a synchronized reconnect storm across every shard.
