@@ -70,6 +70,11 @@ class ExchangeStatus(StrEnum):
     """PRD §20 / Scanner §14."""
 
     ONLINE = "Online"
+    # Data is stale but the venue is still reachable/quoting — kept in the active pool so a
+    # brief quote gap (one slow DEX poll cycle over public RPC) does not drop the venue.
+    # Signals still generate; the confidence Exchange-Health factor is reduced (see
+    # HealthRegistry.health_factor). Only a *sustained* gap escalates to Maintenance.
+    DEGRADED = "Degraded"
     MAINTENANCE = "Maintenance"
     API_OFFLINE = "API Offline"
     UNKNOWN = "Unknown"
@@ -78,6 +83,7 @@ class ExchangeStatus(StrEnum):
     def emoji(self) -> str:
         return {
             "Online": "🟢",
+            "Degraded": "🟠",
             "Maintenance": "🟡",
             "API Offline": "🔴",
             "Unknown": "⚪",
@@ -85,8 +91,9 @@ class ExchangeStatus(StrEnum):
 
     @property
     def signal_allowed(self) -> bool:
-        """Scanner §14.1 — only Online permits signal generation."""
-        return self is ExchangeStatus.ONLINE
+        """Scanner §14.1 — Online and Degraded permit signal generation (Degraded stays in
+        the active pool with reduced confidence); Maintenance/Offline/Unknown do not."""
+        return self in (ExchangeStatus.ONLINE, ExchangeStatus.DEGRADED)
 
 
 class VenueType(StrEnum):

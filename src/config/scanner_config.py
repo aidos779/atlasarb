@@ -184,7 +184,13 @@ class ScannerConfig:
     # DEX pools are polled per cycle over unauthenticated public RPC; one slow cycle
     # must not flip a venue to Maintenance. 30s caused observed DEX flapping — 60s
     # (≈ several poll cycles) eliminated it while still catching a truly dead feed.
+    # Past this the venue goes DEGRADED (data flagged stale but venue kept in the active
+    # pool with reduced confidence), not straight to Maintenance.
     stale_dex_rpc_sec: float = 60.0
+    # A DEX venue that stays stale this long (no fresh pool read) has a genuinely dead feed,
+    # not a slow cycle — escalate DEGRADED -> Maintenance and drop it from signal generation.
+    # 240s ≈ 4 min ≈ several failed poll cycles beyond the DEGRADED grace window.
+    stale_dex_offline_sec: float = 240.0
     # A whole EVM network with zero healthy RPC providers for longer than this is a
     # sustained outage (all pools failing at once — the observed `rpc_all_providers_failed`
     # storms). Surface it as an escalated `rpc_network_down` event for external alerting.
@@ -299,6 +305,13 @@ def validate_config(cfg: ScannerConfig) -> None:
     # Rank thresholds must be monotonically ordered.
     if not (cfg.rank_top_min >= cfg.rank_high_min >= cfg.rank_medium_min):
         raise ConfigError("ranking thresholds must satisfy TOP >= HIGH >= MEDIUM")
+
+    # DEX offline escalation must be no sooner than the DEGRADED (stale) threshold, else a
+    # venue would jump ONLINE -> Maintenance with no DEGRADED grace window at all.
+    if cfg.stale_dex_offline_sec < cfg.stale_dex_rpc_sec:
+        raise ConfigError(
+            "stale_dex_offline_sec must be >= stale_dex_rpc_sec (DEGRADED before Maintenance)"
+        )
 
     # Ranking / confidence / liquidity weights must sum ~1.0.
     for label, weights in (

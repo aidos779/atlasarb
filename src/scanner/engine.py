@@ -263,10 +263,16 @@ class ScanningEngine:
     async def _health_pass(self) -> None:
         now = time.time()
         for venue, adapter in self._adapters.items():
-            threshold = (self._config.stale_cex_ws_sec
-                         if adapter.venue_type.value == "CEX"
-                         else self._config.stale_dex_rpc_sec)
-            self._health.check_staleness(venue, threshold, now)
+            if adapter.venue_type.value == "CEX":
+                # CEX: single-stage — stale WS goes straight to Maintenance (unchanged).
+                self._health.check_staleness(venue, self._config.stale_cex_ws_sec, now)
+            else:
+                # DEX: two-stage — stale pool reads go DEGRADED (kept active), only a
+                # sustained gap escalates to Maintenance, so one slow public-RPC cycle
+                # no longer flaps the venue offline.
+                self._health.check_staleness(
+                    venue, self._config.stale_dex_rpc_sec, now,
+                    offline_after_sec=self._config.stale_dex_offline_sec)
 
     async def _probe_one(self, venue: str, adapter: ExchangeAdapter) -> None:
         start = time.perf_counter()
@@ -293,6 +299,10 @@ class ScanningEngine:
         dex = [v for v, a in self._adapters.items() if a.venue_type.value == "DEX"]
         cex_online = sum(1 for v in cex if statuses[v].signal_allowed)
         dex_online = sum(1 for v in dex if statuses[v].signal_allowed)
+        # DEGRADED venues are counted within dex_online (they still generate signals) but
+        # surfaced separately so a stale-but-active venue is visible in the summary and not
+        # mistaken for fully-fresh capacity.
+        dex_degraded = sum(1 for v in dex if statuses[v] == ExchangeStatus.DEGRADED)
         # Quote-fresh vs discovery are independent (§2.2): a venue can be quoting fine
         # while its discovery snapshot is stale. Report DEX quote freshness separately so
         # a discovery hiccup is visibly NOT the same as an execution-capability outage.
@@ -308,6 +318,7 @@ class ScanningEngine:
         summary = {
             "cex_online": f"{cex_online}/{len(cex)}",
             "dex_online": f"{dex_online}/{len(dex)}",
+            "dex_degraded": dex_degraded,
             "dex_quoting": f"{dex_quoting}/{len(dex)}",
             "rpc_healthy": f"{rpc_healthy}/{rpc_total}",
             "signals_per_min": round((m.signals_created - prev["signals"]) / minutes, 2),
@@ -454,8 +465,10 @@ class ScanningEngine:
 
     def _on_status_transition(self, venue: str, old: ExchangeStatus,
                               new: ExchangeStatus) -> None:
-        """BR-EXST-4 — offline transition force-expires that venue's signals."""
-        if new != ExchangeStatus.ONLINE:
+        """BR-EXST-4 — a transition out of signal-eligibility force-expires that venue's
+        signals. DEGRADED still permits signals (it stays in the active pool), so it does
+        NOT force-expire — only Maintenance/API Offline/Unknown do."""
+        if not new.signal_allowed:
             # Keep a strong reference so the task is not GC'd mid-flight and any
             # exception is retrieved (avoids the "task exception never retrieved"
             # warning and the orphan-task leak during status churn).

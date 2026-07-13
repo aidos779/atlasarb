@@ -112,11 +112,14 @@ class HealthRegistry:
         h.errors.append(0)
         if h.status != ExchangeStatus.ONLINE:
             # Cold start (§14.2): the first healthy check from UNKNOWN brings the
-            # venue Online immediately. The N-consecutive gate only guards *recovery*
-            # from a degraded state (Maintenance / API Offline) — that is where
-            # anti-flap matters. Without this an alternating check leaves a venue
-            # stuck in UNKNOWN forever, silently excluded from signal generation.
+            # venue Online immediately. A DEGRADED venue (stale-but-active) also recovers
+            # on the first fresh stream tick — it never left the active pool, so there is
+            # no flap to guard against. The N-consecutive gate only guards *recovery* from
+            # a truly offline state (Maintenance / API Offline) — that is where anti-flap
+            # matters. Without the UNKNOWN/DEGRADED fast paths an alternating check leaves a
+            # venue stuck out of signal generation.
             if (h.status == ExchangeStatus.UNKNOWN
+                    or (h.status == ExchangeStatus.DEGRADED and stream)
                     or h.consecutive_success >= self._config.health_recovery_consecutive):
                 self._transition(venue, ExchangeStatus.ONLINE)
 
@@ -144,9 +147,18 @@ class HealthRegistry:
     def mark_maintenance(self, venue: str) -> None:
         self._transition(venue, ExchangeStatus.MAINTENANCE)
 
-    def check_staleness(self, venue: str, threshold_sec: float, now: float | None = None) -> None:
-        """Passive health (§2.2): degrade to Maintenance if a venue that *was*
-        streaming market data has gone quiet past the freshness threshold.
+    def check_staleness(self, venue: str, threshold_sec: float,
+                        now: float | None = None,
+                        offline_after_sec: float | None = None) -> None:
+        """Passive health (§2.2): react to a venue that *was* streaming market data going
+        quiet past its freshness threshold.
+
+        Two-stage when ``offline_after_sec`` is given (DEX): past ``threshold_sec`` the
+        venue goes DEGRADED — data is flagged stale but the venue stays in the active pool
+        with reduced confidence, so a single slow public-RPC poll cycle no longer drops it;
+        only once it stays stale past ``offline_after_sec`` (a genuinely dead feed) does it
+        escalate to Maintenance. Single-stage when ``offline_after_sec`` is None (CEX):
+        past ``threshold_sec`` it goes straight to Maintenance, as before.
 
         Keyed off ``last_ws_data_at`` (real WS/pool ticks) — NOT ``last_success_at``,
         which also advances on the periodic REST health-check. Keying it off the
@@ -160,14 +172,29 @@ class HealthRegistry:
         if h.last_ws_data_at == 0:
             return
         age = (now or time.time()) - h.last_ws_data_at
-        if age > threshold_sec:
+        if age <= threshold_sec:
+            return
+
+        # Single-stage (CEX): straight to Maintenance past the threshold.
+        if offline_after_sec is None:
             if h.status == ExchangeStatus.ONLINE:
-                # Log the exact age vs threshold so a Maintenance flap is explained by a
-                # real staleness number (which venue went quiet, for how long) rather
-                # than guesswork.
                 log.info("venue_stale", venue=venue,
                          data_age_sec=round(age, 1), threshold_sec=threshold_sec)
                 self._transition(venue, ExchangeStatus.MAINTENANCE)
+            return
+
+        # Two-stage (DEX): DEGRADED first (kept active), Maintenance only when sustained.
+        if age > offline_after_sec:
+            if h.status in (ExchangeStatus.ONLINE, ExchangeStatus.DEGRADED):
+                log.info("venue_offline_stale", venue=venue, data_age_sec=round(age, 1),
+                         threshold_sec=offline_after_sec)
+                self._transition(venue, ExchangeStatus.MAINTENANCE)
+        elif h.status == ExchangeStatus.ONLINE:
+            # Log the exact age vs threshold so a Degraded flag is explained by a real
+            # staleness number (which venue went quiet, for how long), not guesswork.
+            log.info("venue_stale", venue=venue,
+                     data_age_sec=round(age, 1), threshold_sec=threshold_sec)
+            self._transition(venue, ExchangeStatus.DEGRADED)
 
     def _transition(self, venue: str, new: ExchangeStatus) -> None:
         h = self._venues[venue]
@@ -182,10 +209,19 @@ class HealthRegistry:
             cb(venue, old, new)
 
     def health_factor(self, venue: str) -> Decimal:
-        """0..100 quality for confidence factor (§11.5) — beyond binary Online/Offline."""
+        """0..100 quality for confidence factor (§11.5) — beyond binary Online/Offline.
+
+        DEGRADED still contributes (the venue is quoting) but from a lower ceiling, so its
+        signals rank below equivalent ones from a fully-fresh venue — reflecting that its
+        data is known-stale. Maintenance/Offline/Unknown contribute nothing.
+        """
         h = self._venues[venue]
-        if h.status != ExchangeStatus.ONLINE:
+        if h.status == ExchangeStatus.ONLINE:
+            ceiling = Decimal(100)
+        elif h.status == ExchangeStatus.DEGRADED:
+            ceiling = Decimal(55)
+        else:
             return Decimal(0)
         err_penalty = Decimal(str(h.error_rate())) * Decimal(100)
         lat_penalty = min(Decimal(30), Decimal(str(h.p95_latency_ms())) / Decimal(50))
-        return max(Decimal(0), Decimal(100) - err_penalty - lat_penalty)
+        return max(Decimal(0), ceiling - err_penalty - lat_penalty)

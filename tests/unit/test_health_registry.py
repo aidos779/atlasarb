@@ -68,3 +68,71 @@ def test_fresh_stream_not_degraded():
     fresh = r.health("mexc").last_ws_data_at + 1
     r.check_staleness("mexc", threshold_sec=15.0, now=fresh)
     assert r.status("mexc") == ExchangeStatus.ONLINE
+
+
+# ── P1.4: two-stage DEX staleness (Degraded → Maintenance) ──
+def _dex_reg() -> HealthRegistry:
+    r = HealthRegistry(ScannerConfig())
+    r.register("uniswap_ethereum")
+    return r
+
+
+def test_dex_stale_goes_degraded_not_maintenance():
+    """A stale-but-not-dead DEX venue goes DEGRADED (kept in the active pool, signals still
+    allowed) rather than straight to Maintenance — one slow public-RPC cycle no longer
+    drops the venue."""
+    r = _dex_reg()
+    r.record_success("uniswap_ethereum", stream=True)
+    quiet = r.health("uniswap_ethereum").last_ws_data_at + 90  # past 60s, under 240s
+    r.check_staleness("uniswap_ethereum", threshold_sec=60.0, now=quiet,
+                      offline_after_sec=240.0)
+    assert r.status("uniswap_ethereum") == ExchangeStatus.DEGRADED
+    assert r.is_online("uniswap_ethereum")  # still signal-eligible
+
+
+def test_dex_sustained_staleness_escalates_to_maintenance():
+    r = _dex_reg()
+    r.record_success("uniswap_ethereum", stream=True)
+    base = r.health("uniswap_ethereum").last_ws_data_at
+    r.check_staleness("uniswap_ethereum", threshold_sec=60.0, now=base + 90,
+                      offline_after_sec=240.0)
+    assert r.status("uniswap_ethereum") == ExchangeStatus.DEGRADED
+    # Still no fresh data well past the offline window → escalate.
+    r.check_staleness("uniswap_ethereum", threshold_sec=60.0, now=base + 300,
+                      offline_after_sec=240.0)
+    assert r.status("uniswap_ethereum") == ExchangeStatus.MAINTENANCE
+    assert not r.is_online("uniswap_ethereum")
+
+
+def test_degraded_recovers_online_on_first_fresh_tick():
+    """DEGRADED never left the active pool, so a single fresh pool read restores ONLINE
+    immediately — no N-consecutive anti-flap gate (that only guards true offline)."""
+    r = _dex_reg()
+    r.record_success("uniswap_ethereum", stream=True)
+    quiet = r.health("uniswap_ethereum").last_ws_data_at + 90
+    r.check_staleness("uniswap_ethereum", threshold_sec=60.0, now=quiet,
+                      offline_after_sec=240.0)
+    assert r.status("uniswap_ethereum") == ExchangeStatus.DEGRADED
+    r.record_success("uniswap_ethereum", stream=True)  # one fresh tick
+    assert r.status("uniswap_ethereum") == ExchangeStatus.ONLINE
+
+
+def test_degraded_health_factor_is_reduced_but_nonzero():
+    r = _dex_reg()
+    r.record_success("uniswap_ethereum", stream=True, latency_ms=10.0)
+    online_factor = r.health_factor("uniswap_ethereum")
+    quiet = r.health("uniswap_ethereum").last_ws_data_at + 90
+    r.check_staleness("uniswap_ethereum", threshold_sec=60.0, now=quiet,
+                      offline_after_sec=240.0)
+    degraded_factor = r.health_factor("uniswap_ethereum")
+    assert 0 < degraded_factor < online_factor
+
+
+def test_cex_staleness_still_single_stage_maintenance():
+    """CEX behaviour is unchanged: no offline_after_sec → straight to Maintenance, never
+    DEGRADED (the 'don't touch CEX feeds' constraint)."""
+    r = _reg()
+    r.record_success("mexc", stream=True)
+    quiet = r.health("mexc").last_ws_data_at + 999
+    r.check_staleness("mexc", threshold_sec=15.0, now=quiet)
+    assert r.status("mexc") == ExchangeStatus.MAINTENANCE
