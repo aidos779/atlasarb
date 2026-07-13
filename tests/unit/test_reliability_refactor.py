@@ -216,3 +216,64 @@ def test_healthy_count_for_summary():
     pool.record_failure("u2", RpcErrorKind.HTTP)
     healthy, total = pool.healthy_count()
     assert (healthy, total) == (2, 3)
+
+
+def test_dead_endpoint_permanently_retired_after_streak():
+    """A provider that keeps failing on a hard kind past permanent_fail_threshold is
+    retired for the process (the eth.llamarpc.com / rpc.flashbots.net case): dropped from
+    rotation AND from the usable total, and never re-probed."""
+    pool = RpcProviderPool(urls=["dead", "good"], fail_threshold=3,
+                           permanent_fail_threshold=10, network="ethereum")
+    for _ in range(10):
+        pool.record_failure("dead", RpcErrorKind.HTTP)
+    snap = {p["url"]: p for p in pool.snapshot()}
+    assert snap["dead"]["permanent"] is True
+    # Excluded from rotation and from the usable-capacity total.
+    assert pool.order() == ["good"]
+    assert pool.healthy_count() == (1, 1)
+
+
+def test_retired_provider_not_probed_even_when_all_others_open():
+    """Permanent retirement must hold even in the all-open fallback path — a dead node is
+    never the single probe returned, so it can't burn a call every cycle."""
+    pool = RpcProviderPool(urls=["dead", "flaky"], fail_threshold=2,
+                           permanent_fail_threshold=5, network="ethereum")
+    for _ in range(5):
+        pool.record_failure("dead", RpcErrorKind.HTTP)
+    for _ in range(2):
+        pool.record_failure("flaky", RpcErrorKind.TIMEOUT)  # disabled, not retired
+    # Both are out of normal rotation; the probe must be the recoverable one, never "dead".
+    assert pool.order() == ["flaky"]
+
+
+def test_streak_reset_by_success_spares_provider_from_retirement():
+    """Retirement is streak-based: a node that ever succeeds again resets and survives, so
+    a busy-but-usable endpoint is never retired for scattered failures."""
+    pool = RpcProviderPool(urls=["u"], fail_threshold=3,
+                           permanent_fail_threshold=5, network="bnb")
+    for _ in range(4):
+        pool.record_failure("u", RpcErrorKind.HTTP)
+    pool.record_success("u", latency_ms=100)  # resets the streak
+    for _ in range(4):
+        pool.record_failure("u", RpcErrorKind.HTTP)
+    assert pool.snapshot()[0]["permanent"] is False
+
+
+def test_permanent_retirement_disabled_when_threshold_zero():
+    """The default (0) preserves the pre-existing circuit-breaker behaviour — endless
+    cooldown re-probing, never a streak-based retirement."""
+    pool = RpcProviderPool(urls=["u"], fail_threshold=3,
+                           permanent_fail_threshold=0, network="bnb")
+    for _ in range(200):
+        pool.record_failure("u", RpcErrorKind.HTTP)
+    assert pool.snapshot()[0]["permanent"] is False
+
+
+def test_soft_rpc_errors_do_not_trigger_permanent_retirement():
+    """Only hard kinds (HTTP/RATE_LIMIT/TIMEOUT) retire a node; a stream of soft RPC_ERROR
+    (200-with-null-result) keeps it recoverable — it may be a momentary node hiccup."""
+    pool = RpcProviderPool(urls=["u"], fail_threshold=3,
+                           permanent_fail_threshold=5, network="bnb")
+    for _ in range(20):
+        pool.record_failure("u", RpcErrorKind.RPC_ERROR)
+    assert pool.snapshot()[0]["permanent"] is False

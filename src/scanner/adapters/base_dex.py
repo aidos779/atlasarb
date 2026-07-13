@@ -72,6 +72,7 @@ class BaseDexAdapter(ExchangeAdapter):
             cooldown_base_sec=config.rpc_provider_cooldown_sec,
             cooldown_max_sec=config.rpc_provider_cooldown_max_sec,
             slow_latency_ms=config.rpc_max_healthy_latency_ms,
+            permanent_fail_threshold=config.rpc_provider_permanent_fail_threshold,
         )
         self._limiter = TokenBucket(rate_per_sec, burst)
         self._session: aiohttp.ClientSession | None = None

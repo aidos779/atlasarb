@@ -127,6 +127,8 @@ class RpcProviderPool:
     cooldown_max_sec: float = 300.0
     network: str = ""
     slow_latency_ms: float = 0.0    # de-prioritize (don't disable) nodes slower than this
+    # Consecutive hard failures before a provider is retired permanently (0 = never).
+    permanent_fail_threshold: int = 0
     _providers: list[_Provider] = field(default_factory=list)
     _cursor: int = 0
 
@@ -134,12 +136,15 @@ class RpcProviderPool:
         self._providers = [_Provider(u) for u in self.urls]
 
     def update_config(self, fail_threshold: int, cooldown_base: float,
-                      cooldown_max: float, slow_latency_ms: float | None = None) -> None:
+                      cooldown_max: float, slow_latency_ms: float | None = None,
+                      permanent_fail_threshold: int | None = None) -> None:
         self.fail_threshold = fail_threshold
         self.cooldown_base_sec = cooldown_base
         self.cooldown_max_sec = cooldown_max
         if slow_latency_ms is not None:
             self.slow_latency_ms = slow_latency_ms
+        if permanent_fail_threshold is not None:
+            self.permanent_fail_threshold = permanent_fail_threshold
 
     def order(self, now: float | None = None) -> list[str]:
         """URLs to try this call, best-first.
@@ -216,6 +221,22 @@ class RpcProviderPool:
                 p.disabled_until = now + _PERMANENT_COOLDOWN_SEC
                 log.warning("rpc_provider_retired", network=self.network, url=url,
                             reason="unauthorized", detail="endpoint requires authentication")
+            return
+
+        # Permanent retirement of a persistently dead endpoint (§2.4): a long *consecutive*
+        # streak of hard failures (HTTP block / rate-limit / timeout) is a node that will
+        # not recover without a config change — retire it instead of re-probing every
+        # cooldown cycle for the rest of the process (the eth.llamarpc.com / rpc.flashbots.net
+        # case). Streak-based so a node that ever succeeds again resets and is spared.
+        if (self.permanent_fail_threshold > 0 and kind in _HARD_KINDS
+                and p.fail_streak >= self.permanent_fail_threshold and not p.permanent):
+            p.permanent = True
+            p.cooldown = _PERMANENT_COOLDOWN_SEC
+            p.disabled_until = now + _PERMANENT_COOLDOWN_SEC
+            log.warning("rpc_provider_retired", network=self.network, url=url,
+                        reason="repeated_failures", kind=kind.value,
+                        fail_streak=p.fail_streak,
+                        detail="endpoint dead — retired for process lifetime")
             return
 
         if p.fail_streak >= self.fail_threshold and p.disabled_until <= now:

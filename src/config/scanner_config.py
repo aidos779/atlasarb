@@ -150,6 +150,16 @@ class ScannerConfig:
     rpc_provider_fail_threshold: int = 5
     rpc_provider_cooldown_sec: float = 20.0
     rpc_provider_cooldown_max_sec: float = 300.0
+    # Permanent retirement: a provider that fails this many times *consecutively* on a
+    # hard kind (HTTP block / rate-limit / timeout) is a dead endpoint (deprecated host,
+    # permanent geo-block, moved behind auth) — not a transient blip. It is retired for the
+    # process lifetime instead of being re-probed on the cooldown forever (prod logs showed
+    # eth.llamarpc.com at fail_streak 3600+ and rpc.flashbots.net still being re-probed 300×
+    # over 44h). 50 is far above rpc_provider_fail_threshold (5): reaching it means the node
+    # never once succeeded across ~50 cooldown cycles (hours), so even during a whole-network
+    # RPC outage a genuinely usable node resets its streak long before retirement. 0 disables
+    # permanent retirement (streak-based) entirely. Retired providers reset on restart.
+    rpc_provider_permanent_fail_threshold: int = 50
     # Hedged failover (§2.4). A single rpc_call fans out to `rpc_hedge_factor` healthy
     # providers at once (racing; first good result wins, the rest are cancelled) so one
     # slow/timing-out endpoint cannot set the call's latency floor. It tries at most
