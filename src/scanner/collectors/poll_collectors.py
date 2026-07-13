@@ -71,17 +71,28 @@ class DexPoolCollector:
             if not self._cache.is_tracked(venue, sym.pair):
                 self._cache.track(venue, sym)
 
-        # Read this venue's pools concurrently. The adapter's token bucket bounds the
-        # real RPC rate; gather only overlaps round-trip latency so a full cycle stays
-        # well inside the staleness window.
-        async def _read(sym):
+        # Read this venue's pools with the fewest RPC requests. EVM pool adapters expose
+        # read_pools(), which batches every pool into Multicall3 eth_calls (one request per
+        # ~60 sub-calls) — the fix for the public-node rate-limit storms; it falls back to
+        # per-pool reads internally if multicall is unavailable. Venues without it (Jupiter,
+        # which has its own batched pricing) use the concurrent per-pool path. The token
+        # bucket bounds the real RPC rate so a full cycle stays inside the staleness window.
+        batch_read = getattr(adapter, "read_pools", None)
+        if batch_read is not None:
             try:
-                return await adapter.get_pool_state(sym)
-            except Exception:  # noqa: BLE001
-                return None
+                books: list = await batch_read(markets)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("dex_batch_read_failed", venue=venue, error=describe_exc(exc))
+                books = []
+        else:
+            async def _read(sym):
+                try:
+                    return await adapter.get_pool_state(sym)
+                except Exception:  # noqa: BLE001
+                    return None
 
-        books = await asyncio.gather(*(_read(s) for s in markets),
-                                     return_exceptions=True)
+            books = await asyncio.gather(*(_read(s) for s in markets),
+                                         return_exceptions=True)
         for book in books:
             if book is not None and not isinstance(book, Exception):
                 self._cache.upsert_book(book)

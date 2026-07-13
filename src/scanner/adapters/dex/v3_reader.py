@@ -26,22 +26,27 @@ _LIQUIDITY_SELECTOR = "0x1a686502"  # keccak("liquidity()")[:4]
 _Q96 = 1 << 96
 
 
-async def read_v3_pool(adapter: BaseDexAdapter, venue: str, network: str,
-                       pool: PoolDef) -> OrderBook | None:
-    slot0 = await adapter.eth_call(pool.pool_address, _SLOT0_SELECTOR)
-    if slot0 is None:
+def plan_v3_calls(pool: PoolDef) -> list[tuple[str, str]]:
+    """The (target, calldata) tuples this pool needs — slot0() then liquidity(). Order is
+    significant: decode_v3_pool consumes results in the same order. Used for a direct
+    eth_call pair and for a Multicall3 batch (see multicall.py)."""
+    return [(pool.pool_address, _SLOT0_SELECTOR),
+            (pool.pool_address, _LIQUIDITY_SELECTOR)]
+
+
+def decode_v3_pool(venue: str, network: str, pool: PoolDef,
+                   results: list[str | None]) -> OrderBook | None:
+    """Build the OrderBook from [slot0, liquidity] raw results (from either transport)."""
+    if len(results) < 2 or results[0] is None or results[1] is None:
         return None
-    raw = slot0[2:] if slot0.startswith("0x") else slot0
+    raw = results[0][2:] if results[0].startswith("0x") else results[0]
     if len(raw) < 64:
         return None
     sqrt_price_x96 = int(raw[0:64], 16)  # first return word = sqrtPriceX96
     if sqrt_price_x96 <= 0:
         return None
 
-    liq = await adapter.eth_call(pool.pool_address, _LIQUIDITY_SELECTOR)
-    if liq is None:
-        return None
-    liquidity = int(liq, 16)
+    liquidity = int(results[1], 16)
     if liquidity <= 0:
         return None  # no in-range liquidity — pool is untradeable right now
 
@@ -69,3 +74,12 @@ async def read_v3_pool(adapter: BaseDexAdapter, venue: str, network: str,
         pool_address=pool.pool_address, pool_fee_tier=pool.fee_tier,
         reserve_base=reserve_base, reserve_quote=reserve_quote,
     )
+
+
+async def read_v3_pool(adapter: BaseDexAdapter, venue: str, network: str,
+                       pool: PoolDef) -> OrderBook | None:
+    slot0 = await adapter.eth_call(pool.pool_address, _SLOT0_SELECTOR)
+    if slot0 is None:
+        return None
+    liq = await adapter.eth_call(pool.pool_address, _LIQUIDITY_SELECTOR)
+    return decode_v3_pool(venue, network, pool, [slot0, liq])

@@ -25,12 +25,18 @@ def _decode_reserves(hex_result: str) -> tuple[int, int] | None:
     return reserve0, reserve1
 
 
-async def read_v2_pool(adapter: BaseDexAdapter, venue: str, network: str,
-                       pool: PoolDef) -> OrderBook | None:
-    result = await adapter.eth_call(pool.pool_address, _GET_RESERVES_SELECTOR)
-    if result is None:
+def plan_v2_calls(pool: PoolDef) -> list[tuple[str, str]]:
+    """The (target, calldata) tuples this pool needs — one getReserves() call. Used both
+    for a direct eth_call and for a Multicall3 batch (see multicall.py)."""
+    return [(pool.pool_address, _GET_RESERVES_SELECTOR)]
+
+
+def decode_v2_pool(venue: str, network: str, pool: PoolDef,
+                   results: list[str | None]) -> OrderBook | None:
+    """Build the OrderBook from the raw getReserves() result (from either transport)."""
+    if not results or results[0] is None:
         return None
-    decoded = _decode_reserves(result)
+    decoded = _decode_reserves(results[0])
     if decoded is None:
         return None
     reserve0, reserve1 = decoded
@@ -58,3 +64,9 @@ async def read_v2_pool(adapter: BaseDexAdapter, venue: str, network: str,
         pool_address=pool.pool_address, pool_fee_tier=pool.fee_tier,
         reserve_base=reserve_base, reserve_quote=reserve_quote,
     )
+
+
+async def read_v2_pool(adapter: BaseDexAdapter, venue: str, network: str,
+                       pool: PoolDef) -> OrderBook | None:
+    result = await adapter.eth_call(pool.pool_address, _GET_RESERVES_SELECTOR)
+    return decode_v2_pool(venue, network, pool, [result])
