@@ -58,14 +58,15 @@ BNB_TOKENS: list[TokenDef] = [
     TokenDef("MATIC", "0xCC42724C6683B7E57334c4E856f4c9965ED682bD", 18),
 ]
 
+# USDT only (§3.6). Dropping the USDC quote halves on-chain pool discovery: v2/v3
+# discovery enumerates base × quote, so every base now resolves one pool per fee tier
+# instead of two.
 QUOTE_TOKENS: dict[str, list[TokenDef]] = {
     "ethereum": [
-        TokenDef("USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
         TokenDef("USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6),
     ],
     "bnb": [
         TokenDef("USDT", "0x55d398326f99059fF775485246999027B3197955", 18),
-        TokenDef("USDC", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", 18),
     ],
 }
 
@@ -104,9 +105,6 @@ PANCAKE_V3_FEE_TIERS: tuple[int, ...] = (100, 500, 2500, 10000)
 # ── Curated cold-start fallback pools (used until on-chain discovery succeeds) ──
 UNISWAP_POOLS: dict[str, list[PoolDef]] = {
     "ethereum": [
-        # Uniswap V2 USDC/WETH
-        PoolDef("ETH", "USDC", "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc",
-                token0_is_base=False, base_decimals=18, quote_decimals=6, fee_tier=UNISWAP_FEE),
         # Uniswap V2 WETH/USDT
         PoolDef("ETH", "USDT", "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852",
                 token0_is_base=True, base_decimals=18, quote_decimals=6, fee_tier=UNISWAP_FEE),
@@ -121,18 +119,17 @@ PANCAKE_POOLS: dict[str, list[PoolDef]] = {
     ],
 }
 
+# SushiSwap's only curated pool was USDC/WETH, removed with the USDC quote (§3.6). No
+# verified USDT replacement address is pinned here, so this venue has no cold-start
+# fallback and stays empty until on-chain v2 discovery resolves its USDT pools.
 SUSHI_POOLS: dict[str, list[PoolDef]] = {
-    "ethereum": [
-        # SushiSwap USDC/WETH
-        PoolDef("ETH", "USDC", "0x397FF1542f962076d0BFE58eA045FfA2d347ACa0",
-                token0_is_base=False, base_decimals=18, quote_decimals=6, fee_tier=SUSHI_FEE),
-    ],
+    "ethereum": [],
 }
 
 # Verified base assets eligible for DEX/cross-chain scanning (§3.4 allowlist).
 # Union of every TokenDef symbol above + the Solana (Jupiter) verified set.
 VERIFIED_TOKENS: set[str] = (
     {t.symbol for t in ETHEREUM_TOKENS} | {t.symbol for t in BNB_TOKENS}
-    | {"SOL", "USDC", "USDT", "ARB", "OP",
+    | {"SOL", "USDT", "ARB", "OP",
        "JUP", "BONK", "WIF", "JTO", "PYTH", "RAY", "ORCA", "WLD", "RENDER"}
 )

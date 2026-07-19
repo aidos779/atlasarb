@@ -10,9 +10,9 @@ from aiogram import Bot
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.formatters.signal import format_alert
-from src.bot.i18n import t
 from src.config import get_logger
 from src.domain.signal import Signal
+from src.i18n import t
 from src.scanner.adapters.fx import FxRateProvider
 from src.services.signal_registry import SignalRegistry
 from src.services.user_service import UserService

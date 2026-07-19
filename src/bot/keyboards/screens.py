@@ -5,9 +5,9 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from src.bot.i18n import t
 from src.domain.entitlements import Entitlements, TierPricing
 from src.domain.user import UserProfile
+from src.i18n import filter_label, language_name, t, tier_label
 
 
 def _nav(b: InlineKeyboardBuilder, lang: str, back: str = "nav:home") -> None:
@@ -18,22 +18,25 @@ def _nav(b: InlineKeyboardBuilder, lang: str, back: str = "nav:home") -> None:
 def filters_panel(profile: UserProfile, ent: Entitlements, lang: str) -> InlineKeyboardMarkup:
     f = profile.filter
     b = InlineKeyboardBuilder()
+    any_ = t("filters.any", lang)
     rows = [
-        ("min_profit", f"Minimum Profit: {f.min_profit_pct}%"),
-        ("coin", f"Coin: {', '.join(sorted(f.coins)) or 'Any'}"),
-        ("exchange", f"Exchange: {', '.join(sorted(f.exchanges)) or 'Any'}"),
-        ("network", f"Network: {', '.join(sorted(f.networks)) or 'Any'}"),
-        ("liquidity", f"Liquidity (min): ${f.min_liquidity_usd:g}"),
-        ("risk", f"Risk: ≤ {f.max_risk_numeric}"),
-        ("signal_age", f"Signal Age (max): {f.max_signal_age_sec}s"),
-        ("arbitrage_type", f"Arb Type: {', '.join(sorted(t.value for t in f.arb_types)) or 'All'}"),
+        ("min_profit", f"{f.min_profit_pct}%"),
+        ("coin", ", ".join(sorted(f.coins)) or any_),
+        ("exchange", ", ".join(sorted(f.exchanges)) or any_),
+        ("network", ", ".join(sorted(f.networks)) or any_),
+        ("liquidity", f"${f.min_liquidity_usd:g}"),
+        ("risk", f"≤ {f.max_risk_numeric}"),
+        ("signal_age", f"{f.max_signal_age_sec}s"),
+        ("arbitrage_type",
+         ", ".join(sorted(a.value for a in f.arb_types)) or t("filters.all", lang)),
     ]
-    for field, label in rows:
+    for field, value in rows:
         lock = "" if ent.filter_allowed(field) else " 🔒"
-        b.button(text=f"{label}{lock}", callback_data=f"filters:edit:{field}")
+        b.button(text=f"{filter_label(field, lang)}: {value}{lock}",
+                 callback_data=f"filters:edit:{field}")
     b.adjust(1)
-    b.row(InlineKeyboardButton(text="💾 Save as Default", callback_data="filters:save"),
-          InlineKeyboardButton(text="♻️ Reset", callback_data="filters:reset"))
+    b.row(InlineKeyboardButton(text=t("btn.save_default", lang), callback_data="filters:save"),
+          InlineKeyboardButton(text=t("btn.reset", lang), callback_data="filters:reset"))
     _nav(b, lang, back="menu:signals")
     return b.as_markup()
 
@@ -44,8 +47,8 @@ def numeric_editor(field: str, value: str, lang: str) -> InlineKeyboardMarkup:
     b.button(text=f"{value}", callback_data="noop")
     b.button(text="+", callback_data=f"filters:step:{field}:+")
     b.adjust(3)
-    b.button(text="✏️ Type value", callback_data=f"filters:type:{field}")
-    b.button(text="✅ Done", callback_data="filters:open")
+    b.button(text=t("btn.type_value", lang), callback_data=f"filters:type:{field}")
+    b.button(text=t("btn.done", lang), callback_data="filters:open")
     b.adjust(3, 2)
     return b.as_markup()
 
@@ -57,21 +60,24 @@ def multiselect(field: str, options: list[str], selected: set[str],
         mark = "✅" if opt in selected else "⬜"
         b.button(text=f"{mark} {opt}", callback_data=f"filters:toggle:{field}:{opt}")
     b.adjust(2)
-    b.row(InlineKeyboardButton(text="✅ Done", callback_data="filters:open"))
+    b.row(InlineKeyboardButton(text=t("btn.done", lang), callback_data="filters:open"))
     return b.as_markup()
 
 
 def settings_menu(profile: UserProfile, lang: str) -> InlineKeyboardMarkup:
     s = profile.settings
     b = InlineKeyboardBuilder()
-    b.button(text=f"🌐 Language: {s.language.value}", callback_data="settings:language")
-    b.button(text=f"🕒 Timezone: {s.timezone}", callback_data="settings:timezone")
-    b.button(text=f"💵 Currency: {s.currency.value}", callback_data="settings:currency")
-    b.button(text=f"📈 Minimum Profit: {profile.filter.min_profit_pct}%",
+    b.button(text=t("settings.language", lang, value=language_name(s.language.value)),
+             callback_data="settings:language")
+    b.button(text=t("settings.timezone", lang, value=s.timezone),
+             callback_data="settings:timezone")
+    b.button(text=t("settings.currency", lang, value=s.currency.value),
+             callback_data="settings:currency")
+    b.button(text=t("settings.min_profit", lang, value=profile.filter.min_profit_pct),
              callback_data="filters:edit:min_profit")
-    b.button(text="🏦 Favorite Exchanges", callback_data="fav:exchange")
-    b.button(text="🪙 Favorite Coins", callback_data="fav:coin")
-    b.button(text="🔔 Notification Preferences", callback_data="menu:notifications")
+    b.button(text=t("settings.fav_exchanges", lang), callback_data="fav:exchange")
+    b.button(text=t("settings.fav_coins", lang), callback_data="fav:coin")
+    b.button(text=t("settings.notif_prefs", lang), callback_data="menu:notifications")
     b.adjust(1)
     _nav(b, lang)
     return b.as_markup()
@@ -79,9 +85,9 @@ def settings_menu(profile: UserProfile, lang: str) -> InlineKeyboardMarkup:
 
 def subscription_menu(profile: UserProfile, lang: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="📋 Plan Comparison", callback_data="sub:compare")
+    b.button(text=t("subscription.compare_btn", lang), callback_data="sub:compare")
     if profile.effective_tier.value != "pro":
-        b.button(text="⬆️ Upgrade", callback_data="sub:compare")
+        b.button(text=t("subscription.upgrade_btn", lang), callback_data="sub:compare")
     if profile.subscription.is_paid_active:
         b.button(text=t("subscription.cancel_btn", lang), callback_data="sub:cancel")
     b.adjust(1)
@@ -94,7 +100,8 @@ def plan_comparison(pricing: list[TierPricing], lang: str) -> InlineKeyboardMark
     for plan in pricing:
         if plan.tier.value == "free":
             continue
-        b.button(text=f"Choose {plan.tier.value.title()} — ${plan.monthly_usd:g}/mo",
+        b.button(text=t("subscription.choose_btn", lang,
+                        tier=tier_label(plan.tier, lang), price=f"{plan.monthly_usd:g}"),
                  callback_data=f"sub:choose:{plan.tier.value}")
     b.adjust(1)
     _nav(b, lang, back="menu:subscription")
@@ -144,9 +151,12 @@ def notifications_menu(profile: UserProfile, ent: Entitlements, lang: str) -> In
     b.button(text=f"🔒 {t('notifications.subscription', lang)}", callback_data="noop")
     b.button(text=f"🔒 {t('notifications.system', lang)}", callback_data="noop")
     b.adjust(1)
-    b.row(InlineKeyboardButton(text="🔕 1h", callback_data="notif:pause:1"),
-          InlineKeyboardButton(text="🔕 4h", callback_data="notif:pause:4"),
-          InlineKeyboardButton(text="🔕 Tomorrow", callback_data="notif:pause:24"))
+    b.row(InlineKeyboardButton(text=t("notifications.pause_hours", lang, hours=1),
+                               callback_data="notif:pause:1"),
+          InlineKeyboardButton(text=t("notifications.pause_hours", lang, hours=4),
+                               callback_data="notif:pause:4"),
+          InlineKeyboardButton(text=t("notifications.pause_tomorrow", lang),
+                               callback_data="notif:pause:24"))
     _nav(b, lang)
     return b.as_markup()
 
@@ -162,13 +172,13 @@ def support_menu(lang: str) -> InlineKeyboardMarkup:
 
 def admin_menu(lang: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="👥 User Management", callback_data="admin:users")
-    b.button(text="💳 Subscription Management", callback_data="admin:subs")
-    b.button(text="📢 Broadcast Messages", callback_data="admin:broadcast")
-    b.button(text="📊 Analytics", callback_data="admin:analytics")
-    b.button(text="📡 Signal Monitoring", callback_data="admin:monitoring")
-    b.button(text="📜 Logs", callback_data="admin:logs")
-    b.button(text="🆘 Support Queue", callback_data="admin:support")
+    b.button(text=t("admin.users_btn", lang), callback_data="admin:users")
+    b.button(text=t("admin.subs_btn", lang), callback_data="admin:subs")
+    b.button(text=t("admin.broadcast_btn", lang), callback_data="admin:broadcast")
+    b.button(text=t("admin.analytics_btn", lang), callback_data="admin:analytics")
+    b.button(text=t("admin.monitoring_btn", lang), callback_data="admin:monitoring")
+    b.button(text=t("admin.logs_btn", lang), callback_data="admin:logs")
+    b.button(text=t("admin.support_btn", lang), callback_data="admin:support")
     b.adjust(1)
     b.row(InlineKeyboardButton(text=t("nav.home", lang), callback_data="nav:home"))
     return b.as_markup()

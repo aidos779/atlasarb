@@ -6,22 +6,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
-from src.bot.i18n import t
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import support_menu
 from src.bot.states.states import SupportStates
 from src.domain.user import UserProfile
+from src.i18n import t
 
 router = Router(name="support")
-
-_FAQ = (
-    "📖 <b>FAQ</b>\n\n"
-    "• We never ask for exchange API keys or funds — signals only.\n"
-    "• Free tier: 60s delay, top 5 signals, CEX↔CEX only.\n"
-    "• Upgrade for real-time, more filters, and history.\n"
-    "• Signals are informational; you execute trades yourself."
-)
-
 
 @router.callback_query(F.data == "menu:support")
 async def menu_support(cb: CallbackQuery, profile: UserProfile) -> None:
@@ -33,7 +24,8 @@ async def menu_support(cb: CallbackQuery, profile: UserProfile) -> None:
 @router.callback_query(F.data == "support:faq")
 async def faq(cb: CallbackQuery, profile: UserProfile) -> None:
     lang = profile.settings.language.value
-    await cb.message.edit_text(_FAQ, reply_markup=back_home(lang, back="menu:support"))
+    await cb.message.edit_text(t("support.faq_body", lang),
+                               reply_markup=back_home(lang, back="menu:support"))
     await cb.answer()
 
 

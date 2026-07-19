@@ -36,7 +36,7 @@ class ExchangeAdapter(ABC):
 
     @abstractmethod
     async def get_markets(self) -> list[CanonicalSymbol]:
-        """List tradable USDT/USDC-quoted symbols/pools."""
+        """List tradable USDT-quoted symbols/pools (§3.6)."""
 
     @abstractmethod
     async def subscribe_ticker(self, symbols: list[CanonicalSymbol]) -> None:

@@ -151,16 +151,22 @@ class Network(StrEnum):
 
 
 class QuoteAsset(StrEnum):
-    """PRD §3.6 — MVP scans USDT/USDC only."""
+    """PRD §3.6 — USDT is the single supported quote asset.
+
+    USDC was dropped: every USDC market duplicated its USDT twin, so it doubled the
+    WS subscription and cache footprint while producing a second, near-identical
+    signal for the same underlying opportunity.
+    """
 
     USDT = "USDT"
-    USDC = "USDC"
 
 
 class Language(StrEnum):
+    """Bot UI languages. Kazakh was retired — see migration 0002_drop_kazakh_language,
+    which repoints existing kk users at Russian."""
+
     EN = "en"
     RU = "ru"
-    KK = "kk"
 
 
 class Currency(StrEnum):

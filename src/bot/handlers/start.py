@@ -9,7 +9,6 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
 from src.bot.handlers.common import render_main_menu, render_signal_list
-from src.bot.i18n import t
 from src.bot.keyboards.inline import (
     currency_keyboard,
     language_keyboard,
@@ -18,6 +17,7 @@ from src.bot.keyboards.inline import (
 from src.bot.keyboards.reply import main_reply_keyboard
 from src.domain.enums import Currency, Language
 from src.domain.user import UserProfile
+from src.i18n import t
 
 router = Router(name="start")
 
@@ -116,7 +116,7 @@ async def _show_menu(event: Message, profile: UserProfile) -> None:
     await event.answer(t("menu.title", lang),
                        reply_markup=main_reply_keyboard(lang))
     from src.bot.keyboards.inline import main_menu
-    await event.answer("👇", reply_markup=main_menu(lang))
+    await event.answer(t("menu.prompt", lang), reply_markup=main_menu(lang))
 
 
 @router.message(Command("help"))

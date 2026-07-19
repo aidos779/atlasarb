@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-from src.bot.i18n import t
+from src.i18n import t
 
 
 def main_reply_keyboard(lang: str) -> ReplyKeyboardMarkup:

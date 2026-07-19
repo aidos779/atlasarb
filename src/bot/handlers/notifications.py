@@ -7,11 +7,11 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from src.bot.context import BotContext
-from src.bot.i18n import t
 from src.bot.keyboards.screens import notifications_menu
 from src.database.repositories.misc_repos import NotificationRepository
 from src.domain.entitlements import entitlements_for
 from src.domain.user import UserProfile
+from src.i18n import t, tier_label
 
 router = Router(name="notifications")
 
@@ -39,8 +39,9 @@ async def toggle(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> No
     lang = profile.settings.language.value
     s = profile.settings
     if which in ("fav_coin", "fav_exchange") and not ent.favorite_entity_alerts:
-        await cb.answer(t("filters.upsell", lang, filter="Favorite alerts", tier="Basic"),
-                        show_alert=True)
+        await cb.answer(t("filters.upsell", lang,
+                          filter=t("filters.favorite_alerts", lang),
+                          tier=tier_label("basic", lang)), show_alert=True)
         return
     if which == "instant":
         s.instant_alerts_enabled = not s.instant_alerts_enabled
@@ -77,5 +78,6 @@ async def pause(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> Non
     async with ctx.database.session() as session:
         await NotificationRepository(session).mute_pair(
             profile.telegram_user_id, "*ALL*", until)
-    await cb.answer(f"🔕 Paused all alerts for {hours}h", show_alert=False)
+    await cb.answer(t("notifications.paused", profile.settings.language.value, hours=hours),
+                    show_alert=False)
     await _show(cb, profile)

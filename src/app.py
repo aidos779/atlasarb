@@ -44,6 +44,7 @@ from src.config.scanner_config import ConfigManager, ScannerConfig
 from src.database.base import Database
 from src.database.repositories.history_repo import HistoryRepository
 from src.domain.dev_mode import set_unlimited_access
+from src.i18n import LANGUAGES, validate_catalog
 from src.scanner.adapters.fx import FxRateProvider
 from src.scanner.adapters.registry import build_scanner_components
 from src.scanner.adapters.rpc_health import log_startup_rpc_health
@@ -153,6 +154,10 @@ class Application:
             log.info("paywall_enforced", environment=self.settings.environment)
         # Preflight AFTER the paywall toggle so the check sees the state it validates.
         _verify_production_config(self.settings)
+        # FR-LOC-01 — an incomplete catalog must not reach users as a half-translated UI.
+        # Raises MissingTranslationsError, which main() reports as a fatal startup error.
+        validate_catalog()
+        log.info("i18n_catalog_validated", languages=list(LANGUAGES))
         self.config_manager = ConfigManager(ScannerConfig())
         self.config_manager.apply_environment_layer(
             _environment_config_layer(self.settings.environment))

@@ -15,6 +15,7 @@ from src.config import describe_exc, get_logger
 from src.database.base import Database
 from src.database.repositories.misc_repos import NotificationRepository
 from src.database.repositories.user_repo import UserRepository
+from src.i18n import t
 from src.services.notification_service import Notifier
 from src.services.signal_registry import SignalRegistry
 from src.services.subscription_service import SubscriptionService
@@ -88,12 +89,15 @@ class BackgroundScheduler:
     async def _send_summary(self, profile) -> None:
         matching = [s for s in self._registry.all_active() if profile.filter.matches(s)]
         top = sorted(matching, key=lambda s: s.net_profit_pct, reverse=True)[:3]
-        lines = [f"📊 Daily Summary — {len(matching)} signals match your filters."]
+        lang = profile.settings.language.value
+        lines = [t("summary.title", lang, count=len(matching))]
         for s in top:
-            lines.append(f"• {s.coin}/{s.trading_pair.split('/')[-1]} "
-                         f"{s.net_profit_pct:.2f}% ({s.buy_exchange}→{s.sell_exchange})")
+            lines.append(t("summary.line", lang, coin=s.coin,
+                           quote=s.trading_pair.split("/")[-1],
+                           profit=f"{s.net_profit_pct:.2f}",
+                           buy=s.buy_exchange, sell=s.sell_exchange))
         if not top:
-            lines.append("No matching signals in the last window.")
+            lines.append(t("summary.empty", lang))
         await self._notifier.send_text(profile.telegram_user_id, "\n".join(lines))
 
     async def _expire_subscriptions(self) -> None:
@@ -110,8 +114,8 @@ class BackgroundScheduler:
                 await self._subscriptions.process_renewal(user_id, charge_succeeds=False)
                 if self._notifier:
                     await self._notifier.send_text(
-                        user_id, "Your subscription has ended — you're now on the Free tier. "
-                        "Upgrade any time from 💳 Subscription.")
+                        user_id, t("subscription.ended",
+                                   profile.settings.language.value))
 
     async def _subscriptions_get(self, user_id: int):
         async with self._db.session() as session:

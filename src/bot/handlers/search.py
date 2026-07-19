@@ -9,9 +9,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.context import BotContext
 from src.bot.handlers.common import SESSIONS, render_signal_list
-from src.bot.i18n import t
 from src.bot.states.states import SearchStates
 from src.domain.user import UserProfile
+from src.i18n import t
 
 router = Router(name="search")
 
@@ -59,12 +59,12 @@ async def _do_search(message: Message, ctx: BotContext, profile: UserProfile,
     if result.coins:
         lines.append(f"<b>{t('search.coins', lang)}</b>")
         for sym, count in result.coins:
-            lines.append(f"  ▸ {sym} — [{count} active]")
+            lines.append(f"  ▸ {sym} — [{t('search.active_count', lang, count=count)}]")
             b.button(text=f"🪙 {sym}", callback_data=f"search:coin:{sym}")
     if result.exchanges:
         lines.append(f"<b>{t('search.exchanges', lang)}</b>")
         for name, count in result.exchanges:
-            lines.append(f"  ▸ {name} — [{count} active]")
+            lines.append(f"  ▸ {name} — [{t('search.active_count', lang, count=count)}]")
             b.button(text=f"🏦 {name}", callback_data=f"search:exch:{name}")
     b.adjust(2)
     await message.answer("\n".join(lines), reply_markup=b.as_markup())

@@ -32,6 +32,24 @@ from src.domain.user import (
 
 log = get_logger("repo.user")
 
+_DEFAULT_LANGUAGE = Language.RU
+
+
+def _language_or_default(stored: str) -> Language:
+    """Coerce a stored language code, tolerating retired ones.
+
+    Migration 0002 repoints 'kk' rows at Russian, but a replica that has not run it yet
+    would otherwise raise ValueError here — failing *every* request from that user, not
+    just their language. Degrading to the default keeps them served while the log records
+    the stale value.
+    """
+    try:
+        return Language(stored)
+    except ValueError:
+        log.warning("unknown_language_coerced", stored=stored,
+                    fallback=_DEFAULT_LANGUAGE.value)
+        return _DEFAULT_LANGUAGE
+
 
 class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -213,7 +231,7 @@ class UserRepository:
             auto_renew=sub.auto_renew, retries_used=sub.retries_used,
         )
         settings = UserSettings(
-            language=Language(st.language), timezone=st.timezone,
+            language=_language_or_default(st.language), timezone=st.timezone,
             currency=Currency(st.currency),
             daily_summary_enabled=st.daily_summary_enabled,
             daily_summary_time=st.daily_summary_time,

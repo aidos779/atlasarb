@@ -7,10 +7,10 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
-from src.bot.i18n import t
 from src.bot.keyboards.inline import back_home, upsell_keyboard
 from src.domain.entitlements import entitlements_for
 from src.domain.user import UserProfile
+from src.i18n import t, tier_label
 
 router = Router(name="profile")
 
@@ -28,12 +28,12 @@ async def menu_profile(cb: CallbackQuery, profile: UserProfile) -> None:
 async def _render_profile(event, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     since = (format_datetime(profile.created_at, profile.settings.timezone)
-             if profile.created_at else "—")
+             if profile.created_at else t("profile.unknown", lang))
     lines = [
         t("profile.title", lang), "",
-        f"{profile.first_name or ''} @{profile.username or '—'}",
+        f"{profile.first_name or ''} @{profile.username or t('profile.unknown', lang)}",
         f"{t('profile.member_since', lang)}: {since}",
-        f"{t('profile.tier', lang)}: {profile.effective_tier.value.title()}",
+        f"{t('profile.tier', lang)}: {tier_label(profile.effective_tier, lang)}",
     ]
     kb = back_home(lang)
     if isinstance(event, CallbackQuery):
@@ -47,16 +47,17 @@ async def _render_profile(event, profile: UserProfile) -> None:
 async def menu_analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     summary = ctx.analytics.today()
-    coins = ", ".join(f"{c}({n})" for c, n in summary.top_coins) or "—"
-    exch = ", ".join(f"{e}({n})" for e, n in summary.top_exchanges) or "—"
-    text = (
-        "📈 <b>Today's Analytics</b>\n\n"
-        f"Signals today: {summary.total_today}\n"
-        f"Active now: {summary.total_active}\n"
-        f"Avg profit: {summary.avg_profit_pct:.2f}%\n"
-        f"Top coins: {coins}\n"
-        f"Top exchanges: {exch}"
-    )
+    none = t("analytics.none", lang)
+    coins = ", ".join(f"{c}({n})" for c, n in summary.top_coins) or none
+    exch = ", ".join(f"{e}({n})" for e, n in summary.top_exchanges) or none
+    text = "\n".join([
+        f"<b>{t('analytics.title', lang)}</b>", "",
+        f"{t('analytics.signals_today', lang)}: {summary.total_today}",
+        f"{t('analytics.active_now', lang)}: {summary.total_active}",
+        f"{t('analytics.avg_profit', lang)}: {summary.avg_profit_pct:.2f}%",
+        f"{t('analytics.top_coins', lang)}: {coins}",
+        f"{t('analytics.top_exchanges', lang)}: {exch}",
+    ])
     await cb.message.edit_text(text, reply_markup=back_home(lang))
     await cb.answer()
 

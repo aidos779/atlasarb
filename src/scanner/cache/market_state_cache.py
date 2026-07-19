@@ -19,7 +19,13 @@ from decimal import Decimal
 
 from src.config import get_logger
 from src.config.scanner_config import ScannerConfig
-from src.domain.market import CanonicalSymbol, FundingRate, OrderBook, PriceQuote
+from src.domain.market import (
+    CanonicalSymbol,
+    FundingRate,
+    OrderBook,
+    PriceQuote,
+    is_supported_quote,
+)
 from src.scanner import mathx
 
 log = get_logger("scanner.cache")
@@ -56,6 +62,12 @@ class MarketStateCache:
         self._listeners.append(listener)
 
     def track(self, venue: str, symbol: CanonicalSymbol) -> None:
+        # Non-USDT quotes (§3.6) never earn a cache slot. upsert_price/upsert_book both
+        # gate on _tracked, so refusing here is what keeps their books and snapshots out
+        # of memory entirely rather than merely unread.
+        if not is_supported_quote(symbol.quote_asset):
+            log.debug("track_rejected_quote", venue=venue, pair=symbol.pair)
+            return
         self._tracked.add((venue, symbol.pair))
 
     def untrack(self, venue: str, pair: str) -> None:

@@ -17,8 +17,8 @@ from src.bot.handlers import (
     subscription,
     support,
 )
-from src.bot.i18n import t
 from src.domain.user import UserProfile
+from src.i18n import t
 
 fallback = Router(name="fallback")
 

@@ -6,12 +6,12 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
-from src.bot.i18n import t
 from src.bot.keyboards.inline import currency_keyboard, language_keyboard, timezone_keyboard
 from src.bot.keyboards.reply import main_reply_keyboard
 from src.bot.keyboards.screens import settings_menu
 from src.domain.enums import Currency, Language
 from src.domain.user import UserProfile
+from src.i18n import language_name, t, translations_of
 
 router = Router(name="settings")
 
@@ -31,7 +31,7 @@ async def cmd_settings(message: Message, profile: UserProfile) -> None:
     await _show_settings(message, profile)
 
 
-@router.message(F.text.in_({"⚙️ Settings", "⚙️ Настройки", "⚙️ Баптаулар"}))
+@router.message(F.text.in_(translations_of("menu.settings")))
 async def reply_settings(message: Message, profile: UserProfile) -> None:
     await _show_settings(message, profile)
 
@@ -67,8 +67,11 @@ async def set_language(cb: CallbackQuery, ctx: BotContext, profile: UserProfile)
     code = cb.data.split(":")[-1]
     await ctx.users.set_language(profile, Language(code))
     profile.settings.language = Language(code)
+    # Everything below re-renders in the NEW language: the confirmation, the persistent
+    # reply keyboard, and the settings screen itself — no restart, no stale menu.
     await cb.message.answer(
-        t("settings.updated", code, field="Language", value=code),
+        t("settings.updated", code, field=t("settings.field.language", code),
+          value=language_name(code)),
         reply_markup=main_reply_keyboard(code))
     await _show_settings(cb, profile)
 
@@ -79,7 +82,8 @@ async def set_timezone(cb: CallbackQuery, ctx: BotContext, profile: UserProfile)
     await ctx.users.set_timezone(profile, tz)
     profile.settings.timezone = tz
     lang = profile.settings.language.value
-    await cb.answer(t("settings.updated", lang, field="Timezone", value=tz))
+    await cb.answer(t("settings.updated", lang, field=t("settings.field.timezone", lang),
+                      value=tz))
     await _show_settings(cb, profile)
 
 
@@ -89,5 +93,6 @@ async def set_currency(cb: CallbackQuery, ctx: BotContext, profile: UserProfile)
     await ctx.users.set_currency(profile, Currency(cur))
     profile.settings.currency = Currency(cur)
     lang = profile.settings.language.value
-    await cb.answer(t("settings.updated", lang, field="Currency", value=cur))
+    await cb.answer(t("settings.updated", lang, field=t("settings.field.currency", lang),
+                      value=cur))
     await _show_settings(cb, profile)

@@ -46,4 +46,4 @@ ignore = ["B008"]
 
 [tool.ruff.lint.per-file-ignores]
 # Translation catalog: human-readable strings must not be wrapped mid-sentence.
-"src/bot/i18n/catalog.py" = ["E501"]
+"src/i18n/catalog.py" = ["E501"]

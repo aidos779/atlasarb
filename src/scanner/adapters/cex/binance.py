@@ -5,7 +5,14 @@ from decimal import Decimal
 
 import aiohttp
 
-from src.domain.market import BookLevel, CanonicalSymbol, FundingRate, OrderBook, PriceQuote
+from src.domain.market import (
+    BookLevel,
+    CanonicalSymbol,
+    FundingRate,
+    OrderBook,
+    PriceQuote,
+    is_supported_quote,
+)
 from src.scanner.adapters.base_cex import BaseCexAdapter
 
 _FUTURES_URL = "https://fapi.binance.com"
@@ -45,7 +52,7 @@ class BinanceAdapter(BaseCexAdapter):
             if s.get("status") != "TRADING" or not s.get("isSpotTradingAllowed"):
                 continue
             quote = s.get("quoteAsset")
-            if quote not in ("USDT", "USDC"):
+            if not is_supported_quote(quote or ""):
                 continue
             out.append(self._canonical(s["baseAsset"], quote))
         return out

@@ -10,7 +10,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 from src.config.settings import Settings
-from src.domain.market import CanonicalSymbol  # noqa: F401 (used for typing intent)
+from src.domain.market import (  # noqa: F401 (CanonicalSymbol used for typing intent)
+    SUPPORTED_QUOTE,
+    CanonicalSymbol,
+)
 from src.scanner.cache.market_state_cache import MarketStateCache
 
 _NATIVE_SYMBOL = {
@@ -49,12 +52,11 @@ class RpcGasProvider:
         return gas_cost_native * native_price
 
     def _native_price_usd(self, native: str) -> Decimal | None:
-        for quote in ("USDT", "USDC"):
-            pair = f"{native}/{quote}"
-            for venue in self._cache.venues_for_pair(pair):
-                q = self._cache.get_price(venue, pair)
-                if q is not None and q.mid > 0:
-                    return q.mid
+        pair = f"{native}/{SUPPORTED_QUOTE}"
+        for venue in self._cache.venues_for_pair(pair):
+            q = self._cache.get_price(venue, pair)
+            if q is not None and q.mid > 0:
+                return q.mid
         return None
 
     async def _gas_price_wei(self, network: str) -> Decimal | None:

@@ -29,9 +29,8 @@ _ALLOWED_BASES: set[str] = {"SOL", "JUP", "BONK", "WIF", "JTO", "PYTH", "RAY",
                             "ORCA", "RENDER", "WLD"}
 
 _SOL_MINT = "So11111111111111111111111111111111111111112"
-_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 _USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-_QUOTES = {"USDC": _USDC_MINT, "USDT": _USDT_MINT}
+_QUOTES = {"USDT": _USDT_MINT}          # USDT-only quote universe (§3.6)
 
 _PRICE_TTL_SEC = 4.0            # batch price refresh cadence (≈ block-ish)
 _MAX_BASES = 40                 # price/v3 accepts up to 50 ids per call
@@ -105,7 +104,7 @@ class JupiterAdapter(BaseDexAdapter):
         async with self._price_lock:
             if time.time() - self._prices_at < _PRICE_TTL_SEC:
                 return  # another coroutine already refreshed while we waited
-            ids = list(self._mints.values()) + [_USDC_MINT, _USDT_MINT]
+            ids = list(self._mints.values()) + [_USDT_MINT]
             await self._limiter.acquire()
             async with self._session.get(
                 f"{self._api_root}/price/v3", params={"ids": ",".join(ids)}

@@ -10,10 +10,10 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
 from src.bot.formatters.signal import format_card
-from src.bot.i18n import t
 from src.bot.keyboards.inline import main_menu, signal_list_controls
 from src.domain.entitlements import UNLIMITED, entitlements_for
 from src.domain.user import UserFilter, UserProfile
+from src.i18n import t
 
 _SORT_MODES = ["profit", "spread", "liquidity", "risk", "age"]
 _PAGE_SIZE = 5

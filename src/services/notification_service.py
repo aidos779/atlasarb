@@ -24,6 +24,7 @@ from src.database.repositories.user_repo import UserRepository
 from src.domain.entitlements import UNLIMITED, entitlements_for
 from src.domain.signal import Signal
 from src.domain.user import UserProfile
+from src.i18n import t
 from src.services.engine_bridge import EngineBridge
 
 log = get_logger("services.notification")
@@ -251,9 +252,7 @@ class NotificationService:
 
         if notify_throttled:
             await self._notifier.send_text(
-                uid,
-                "You've hit your hourly alert limit — more matching signals "
-                "were found. Upgrade to Pro for unlimited alerts.")
+                uid, t("alert.hourly_cap", settings.language.value))
         if capped:
             return False
 

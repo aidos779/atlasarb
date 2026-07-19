@@ -1,6 +1,6 @@
 """Market Collector (Scanner §3) — discovery, delisting, warm-up gating.
 
-Maintains the canonical tradable-pair set per venue. Restricts to USDT/USDC spot
+Maintains the canonical tradable-pair set per venue. Restricts to USDT spot
 (R-QUOTE-1), auto-discovers new pairs (BR-ASSET-1/2), and removes delisted pairs after
 a grace period (§3.2), force-expiring any open signals referencing them.
 """
@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from src.config import describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
 from src.domain.enums import VenueType
-from src.domain.market import CanonicalSymbol
+from src.domain.market import CanonicalSymbol, is_supported_pair, is_supported_quote
 from src.domain.ports import ExchangeAdapter
 from src.scanner.adapters.backoff import backoff_delay
 from src.scanner.cache.market_state_cache import MarketStateCache
@@ -90,7 +90,8 @@ class MarketCollector:
             if self._health is not None:
                 self._health.record_discovery(venue)
             markets = self._filter_ambiguous(venue, markets)
-            current = {m.pair for m in markets if m.quote_asset in ("USDT", "USDC")}
+            markets = self._filter_quote(venue, markets)
+            current = {m.pair for m in markets}
             await self._apply_discovery(venue, adapter, markets, current)
         # Refresh priority top-100 from breadth of tracked pairs (proxy).
         self._priority.set_top100({p.split("/")[0] for p in self.tracked_pairs()})
@@ -120,6 +121,22 @@ class MarketCollector:
             log.info("ambiguous_tickers_skipped", venue=venue, dropped=dropped,
                      tickers=sorted({m.base_asset for m in markets
                                      if m.base_asset in blacklist}))
+        return kept
+
+    def _filter_quote(self, venue: str,
+                      markets: list[CanonicalSymbol]) -> list[CanonicalSymbol]:
+        """Keep USDT markets only (R-QUOTE-1).
+
+        Adapters already filter by quote at the venue API, but this is the pipeline's
+        last common choke point before a pair earns a subscription and a cache slot, so
+        it is enforced here too — a single adapter regression cannot leak a non-USDT
+        market into the tracked set.
+        """
+        kept = [m for m in markets
+                if is_supported_quote(m.quote_asset) and is_supported_pair(m.pair)]
+        dropped = len(markets) - len(kept)
+        if dropped:
+            log.debug("unsupported_quote_skipped", venue=venue, dropped=dropped)
         return kept
 
     async def _apply_discovery(

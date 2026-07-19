@@ -21,7 +21,7 @@ from typing import Protocol
 # the profit gate never passes a signal a real withdrawal would have made unprofitable.
 _STATIC_COIN_FEE_USD: dict[str, Decimal] = {
     "BTC": Decimal("2.0"), "ETH": Decimal("3.0"), "BNB": Decimal("0.20"),
-    "SOL": Decimal("0.02"), "USDT": Decimal("1.0"), "USDC": Decimal("1.0"),
+    "SOL": Decimal("0.02"), "USDT": Decimal("1.0"),
     "XRP": Decimal("0.02"), "DOGE": Decimal("0.05"), "LTC": Decimal("0.02"),
     "ADA": Decimal("0.20"), "DOT": Decimal("0.10"), "MATIC": Decimal("0.10"),
     "LINK": Decimal("1.0"), "UNI": Decimal("1.0"), "AAVE": Decimal("1.0"),

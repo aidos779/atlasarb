@@ -86,7 +86,7 @@ class DexPoolLeg(LiquidityLeg):
         if not spot or spot <= 0:
             return None
         if self.side == "buy":
-            amount_in_quote = size_usd  # quote ~ USD (USDT/USDC)
+            amount_in_quote = size_usd  # quote ~ USD (USDT)
             base_out = mathx.amm_output(
                 self.reserve_quote, self.reserve_base, amount_in_quote, self.fee_rate
             )

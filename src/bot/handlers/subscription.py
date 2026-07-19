@@ -15,7 +15,6 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
-from src.bot.i18n import t
 from src.bot.keyboards.screens import (
     checkout_keyboard,
     plan_comparison,
@@ -23,6 +22,7 @@ from src.bot.keyboards.screens import (
 )
 from src.domain.enums import SubscriptionTier
 from src.domain.user import UserProfile
+from src.i18n import t, tier_label, translations_of
 
 router = Router(name="subscription")
 
@@ -30,14 +30,15 @@ router = Router(name="subscription")
 async def _show_subscription(event, ctx: BotContext, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     ent = ctx.subscriptions.entitlements(profile)
-    tier = profile.effective_tier.value.title()
     lines = [t("subscription.title", lang), "",
-             t("subscription.current", lang, tier=tier)]
+             t("subscription.current", lang,
+               tier=tier_label(profile.effective_tier, lang))]
     if profile.subscription.period_end:
-        lines.append("Renews/expires: "
-                     + format_datetime(profile.subscription.period_end, profile.settings.timezone))
-    per_refresh = '∞' if ent.signals_per_refresh < 0 else ent.signals_per_refresh
-    lines.append(f"Signals/refresh: {per_refresh}")
+        lines.append(t("subscription.renews", lang, date=format_datetime(
+            profile.subscription.period_end, profile.settings.timezone)))
+    per_refresh = (t("subscription.unlimited", lang) if ent.signals_per_refresh < 0
+                   else ent.signals_per_refresh)
+    lines.append(t("subscription.per_refresh", lang, count=per_refresh))
     kb = subscription_menu(profile, lang)
     text = "\n".join(lines)
     if isinstance(event, CallbackQuery):
@@ -52,7 +53,7 @@ async def cmd_subscription(message: Message, ctx: BotContext, profile: UserProfi
     await _show_subscription(message, ctx, profile)
 
 
-@router.message(F.text.in_({"💳 Subscription", "💳 Подписка", "💳 Жазылым"}))
+@router.message(F.text.in_(translations_of("menu.subscription")))
 async def reply_subscription(message: Message, ctx: BotContext, profile: UserProfile) -> None:
     await _show_subscription(message, ctx, profile)
 
@@ -66,10 +67,13 @@ async def menu_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserPro
 async def compare_plans(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     pricing = ctx.subscriptions.pricing()
-    lines = ["📋 <b>Plan Comparison</b>", ""]
+    lines = [f"<b>{t('subscription.compare_title', lang)}</b>", ""]
     for plan in pricing:
-        marker = " (current)" if plan.tier == profile.effective_tier else ""
-        lines.append(f"<b>{plan.tier.value.title()} — ${plan.monthly_usd:g}/mo</b>{marker}")
+        marker = (t("subscription.current_marker", lang)
+                  if plan.tier == profile.effective_tier else "")
+        line = t("subscription.plan_line", lang, tier=tier_label(plan.tier, lang),
+                 price=f"{plan.monthly_usd:g}")
+        lines.append(f"<b>{line}</b>{marker}")
         for feat in plan.features:
             lines.append(f"  • {feat}")
         lines.append("")
@@ -83,10 +87,15 @@ async def choose_plan(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) 
     lang = profile.settings.language.value
     target = SubscriptionTier(tier)
     charge = ctx.subscriptions.prorated_charge(profile, target)
-    text = (f"You selected <b>{tier.title()}</b>.\n"
-            f"Billing: monthly.\nAmount due now: <b>${charge:.2f}</b>"
-            + (" (pro-rated credit applied)" if profile.subscription.is_paid_active else "")
-            + "\n\nPay with Telegram Payments or crypto invoice.")
+    prorated = (t("subscription.prorated", lang)
+                if profile.subscription.is_paid_active else "")
+    text = "\n".join([
+        t("subscription.selected", lang, tier=tier_label(target, lang)),
+        t("subscription.billing_monthly", lang),
+        t("subscription.amount_due", lang, amount=f"{charge:.2f}") + prorated,
+        "",
+        t("subscription.pay_hint", lang),
+    ])
     await cb.message.edit_text(text, reply_markup=checkout_keyboard(tier, lang))
     await cb.answer()
 
@@ -108,7 +117,7 @@ async def confirm_payment(cb: CallbackQuery, ctx: BotContext, profile: UserProfi
         return
     updated = await ctx.subscriptions.activate(profile.telegram_user_id, target, charge)
     await cb.message.edit_text(
-        t("subscription.upgraded", lang, tier=tier.title()))
+        t("subscription.upgraded", lang, tier=tier_label(target, lang)))
     await _show_subscription(cb, ctx, updated)
 
 
@@ -120,6 +129,6 @@ async def cancel_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserP
             if updated.subscription.period_end
             else format_datetime(time.time() + 30 * 86400, profile.settings.timezone))
     await cb.message.edit_text(
-        t("subscription.cancelled", lang, tier=updated.subscription.tier.value.title(),
-          date=date))
+        t("subscription.cancelled", lang,
+          tier=tier_label(updated.subscription.tier, lang), date=date))
     await cb.answer()

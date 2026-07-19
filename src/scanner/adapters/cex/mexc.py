@@ -8,7 +8,14 @@ from decimal import Decimal
 
 import aiohttp
 
-from src.domain.market import BookLevel, CanonicalSymbol, FundingRate, OrderBook, PriceQuote
+from src.domain.market import (
+    BookLevel,
+    CanonicalSymbol,
+    FundingRate,
+    OrderBook,
+    PriceQuote,
+    is_supported_quote,
+)
 from src.scanner.adapters.base_cex import BaseCexAdapter
 from src.scanner.adapters.cex.mexc_pb import decode_push
 
@@ -41,7 +48,7 @@ class MexcAdapter(BaseCexAdapter):
             if status not in ("ENABLED", "1", 1, "TRADING"):
                 continue
             quote = s.get("quoteAsset")
-            if quote not in ("USDT", "USDC"):
+            if not is_supported_quote(quote or ""):
                 continue
             out.append(self._canonical(s["baseAsset"], quote))
         return out

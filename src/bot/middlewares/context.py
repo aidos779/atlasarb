@@ -13,6 +13,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, User
 
 from src.bot.context import BotContext
+from src.i18n import t
 
 
 class ContextMiddleware(BaseMiddleware):
@@ -36,13 +37,13 @@ class ContextMiddleware(BaseMiddleware):
         data["profile"] = profile
 
         if profile.suspended:
-            await self._notify_suspended(event)
+            await self._notify_suspended(event, profile.settings.language.value)
             return None
         return await handler(event, data)
 
     @staticmethod
-    async def _notify_suspended(event: TelegramObject) -> None:
-        text = "⛔ Your account is suspended. Contact support."
+    async def _notify_suspended(event: TelegramObject, lang: str) -> None:
+        text = t("error.suspended", lang)
         if isinstance(event, Message):
             await event.answer(text)
         elif isinstance(event, CallbackQuery):

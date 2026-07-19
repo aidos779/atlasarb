@@ -127,7 +127,7 @@ async def test_multicall_read_returns_none_when_call_fails():
 
 # ── adapter read_pools: batched success + per-pool fallback ──
 _V3_POOL = PoolDef(
-    base_asset="WETH", quote_asset="USDC",
+    base_asset="WETH", quote_asset="USDT",
     pool_address="0x0000000000000000000000000000000000000010",
     token0_is_base=True, base_decimals=18, quote_decimals=6, fee_tier=Decimal("0.0005"),
 )
@@ -162,7 +162,7 @@ async def test_read_pools_batches_into_single_multicall():
 
     adapter.eth_call = fake_eth_call
     books = await adapter.read_pools(
-        [type("S", (), {"pair": "WETH/USDC"})()]  # object with .pair
+        [type("S", (), {"pair": "WETH/USDT"})()]  # object with .pair
     )
     assert len(books) == 1
     assert books[0].venue == "uniswap_v3_ethereum"
@@ -187,7 +187,7 @@ async def test_read_pools_falls_back_to_per_pool_when_multicall_unavailable():
         return slot0 if "3850c7bd" in data else liq
 
     adapter.eth_call = fake_eth_call
-    books = await adapter.read_pools([type("S", (), {"pair": "WETH/USDC"})()])
+    books = await adapter.read_pools([type("S", (), {"pair": "WETH/USDT"})()])
     assert len(books) == 1
     assert MULTICALL3_ADDRESS in calls          # tried the batch first
     # Fallback then issued the two direct pool calls (slot0 + liquidity).

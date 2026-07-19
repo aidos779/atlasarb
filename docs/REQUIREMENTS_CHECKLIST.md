@@ -11,7 +11,7 @@ Maps every requirement area from both specifications to the code that implements
 | §3.2 ARCH-1 modular adapter interface, zero engine branching | `domain/ports.py:ExchangeAdapter`, `scanner/engine.py` | ✅ |
 | §3.3 ARCH-2 official REST/WS/SDK/RPC only, no scraping | CEX WS+REST adapters, DEX RPC/quote adapters | ✅ |
 | §3.5 Supported networks + R-NET-1/2 (network as venue identity) | `domain/enums.py:Network`, `CanonicalSymbol.network` | ✅ |
-| §3.6 USDT/USDC quote only + R-QUOTE-1/2 | adapter `get_markets` filters; discovery `_apply_discovery` | ✅ |
+| §3.6 USDT quote only + R-QUOTE-1/2 | adapter `get_markets` filters; discovery `_filter_quote`; cache `track` | ✅ |
 | §3.7 auto-discovery BR-ASSET-1/2/4 | `collectors/market_collector.py` | ✅ |
 | §3.8 arbitrage types | `domain/enums.py:ArbitrageType` | ✅ |
 | §3.9 canonical Signal schema (all fields) | `domain/signal.py:Signal` | ✅ |
@@ -52,7 +52,7 @@ Maps every requirement area from both specifications to the code that implements
 | FR-ONB/SIG/DET/SRCH/FILT/NOTIF/FAV/PROF/SUB/ADM/LOC/EXP/COOL/RANK/EXST | across services + bot + scanner | ✅ |
 | NFR-SEC-01..06 (no keys, webhook verify, allow-list, audit, encryption at rest) | `settings.py`, `middlewares/context.py`, `admin_service`, `database` | ✅ |
 | NFR-PERF/AVAIL/SCALE (latency budgets, degraded fallback, adapter modularity) | `engine.py`, `reconciliation`, `signals.empty/scanner_down` states | ✅ |
-| FR-LOC-01/02 (en/ru/kk, FX ≤5min) | `bot/i18n/*`, `scanner/adapters/fx.py` | ✅ |
+| FR-LOC-01/02 (en/ru, FX ≤5min) | `i18n/*` (strict catalog, validated at startup), `scanner/adapters/fx.py` | ✅ |
 
 ## Part 3 — Scanning Engine
 

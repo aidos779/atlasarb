@@ -9,8 +9,8 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from src.bot.i18n import t
 from src.domain.signal import Signal
+from src.i18n import t
 
 
 def _nav_row(lang: str, home: bool = True, back: str = "nav:home") -> list[InlineKeyboardButton]:
@@ -36,7 +36,9 @@ def main_menu(lang: str) -> InlineKeyboardMarkup:
 
 def language_keyboard(prefix: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for code, label in (("en", "🇬🇧 English"), ("ru", "🇷🇺 Русский"), ("kk", "🇰🇿 Қазақша")):
+    # Language names stay in their own language — a user looking for their language
+    # recognises "Русский", not its translation.
+    for code, label in (("en", "🇬🇧 English"), ("ru", "🇷🇺 Русский")):
         b.button(text=label, callback_data=f"{prefix}:{code}")
     b.adjust(1)
     return b.as_markup()
@@ -120,7 +122,7 @@ def details_buttons(signal: Signal, is_favorite: bool, bot_username: str,
 
 def upsell_keyboard(lang: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="💳 Upgrade", callback_data="menu:subscription")
+    b.button(text=t("btn.upgrade", lang), callback_data="menu:subscription")
     b.row(*_nav_row(lang))
     return b.as_markup()
 

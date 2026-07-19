@@ -5,7 +5,14 @@ from decimal import Decimal
 
 import aiohttp
 
-from src.domain.market import BookLevel, CanonicalSymbol, FundingRate, OrderBook, PriceQuote
+from src.domain.market import (
+    BookLevel,
+    CanonicalSymbol,
+    FundingRate,
+    OrderBook,
+    PriceQuote,
+    is_supported_quote,
+)
 from src.scanner.adapters.base_cex import BaseCexAdapter
 
 
@@ -38,7 +45,7 @@ class OkxAdapter(BaseCexAdapter):
             if s.get("state") != "live":
                 continue
             quote = s.get("quoteCcy")
-            if quote not in ("USDT", "USDC"):
+            if not is_supported_quote(quote or ""):
                 continue
             out.append(self._canonical(s["baseCcy"], quote))
         return out

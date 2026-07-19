@@ -13,12 +13,12 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.context import BotContext
-from src.bot.i18n import t
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import admin_menu
 from src.bot.states.states import AdminStates
 from src.domain.enums import SubscriptionTier, UserRole
 from src.domain.user import UserProfile
+from src.i18n import t, tier_label
 
 router = Router(name="admin")
 
@@ -55,21 +55,25 @@ async def monitoring(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -
     status_lines = "\n".join(
         f"{v}: {s}" for v, s in data["exchange_status"].items())
     m = data["metrics"]
+    lang = profile.settings.language.value
     b = InlineKeyboardBuilder()
     for venue in data["exchange_status"]:
-        b.button(text=f"⛔ Kill {venue}", callback_data=f"admin:kill:{venue}")
+        b.button(text=t("admin.kill_btn", lang, venue=venue),
+                 callback_data=f"admin:kill:{venue}")
     b.adjust(2)
-    b.row(*back_home(profile.settings.language.value, back="admin:menu").inline_keyboard[0])
-    text = (
-        "📡 <b>Signal Monitoring</b>\n\n"
-        f"<b>Connectors</b>\n{status_lines}\n\n"
-        f"Active signals: {data['active_signals']}\n"
-        f"Created: {m['signals_created']} · Updated: {m['signals_updated']} · "
-        f"Expired: {m['signals_expired']}\n"
-        f"Detection p95: {m['detection_p95_ms']}ms · Gen p95: {m['generation_p95_ms']}ms\n"
-        f"Cache: {m['cache_size']} · Outliers: {m['outliers']}\n"
-        f"Top rejections: {dict(list(m['rejections'].items())[:5])}"
-    )
+    b.row(*back_home(lang, back="admin:menu").inline_keyboard[0])
+    text = "\n".join([
+        t("admin.monitoring_title", lang), "",
+        f"<b>{t('admin.connectors', lang)}</b>", status_lines, "",
+        t("admin.active_signals", lang, count=data["active_signals"]),
+        t("admin.signal_counts", lang, created=m["signals_created"],
+          updated=m["signals_updated"], expired=m["signals_expired"]),
+        t("admin.latency", lang, detection=m["detection_p95_ms"],
+          generation=m["generation_p95_ms"]),
+        t("admin.cache_line", lang, size=m["cache_size"], outliers=m["outliers"]),
+        t("admin.top_rejections", lang,
+          rejections=dict(list(m["rejections"].items())[:5])),
+    ])
     await cb.message.edit_text(text, reply_markup=b.as_markup())
     await cb.answer()
 
@@ -77,11 +81,13 @@ async def monitoring(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -
 @router.callback_query(F.data.startswith("admin:kill:"))
 async def kill_switch(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if profile.role != UserRole.ADMIN:
-        await cb.answer("Admin only", show_alert=True)
+        await cb.answer(t("admin.admin_only", profile.settings.language.value),
+                        show_alert=True)
         return
     venue = cb.data.split(":")[-1]
     ctx.admin.kill_switch(venue, True)
-    await cb.answer(f"⛔ {venue} disabled", show_alert=True)
+    await cb.answer(t("admin.killed", profile.settings.language.value, venue=venue),
+                    show_alert=True)
 
 
 @router.callback_query(F.data == "admin:analytics")
@@ -91,15 +97,15 @@ async def analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) ->
         return
     mrr = await ctx.admin.mrr()
     metrics = ctx.analytics.engine_metrics()
-    text = (
-        "📊 <b>Platform Analytics</b>\n\n"
-        f"MRR (cumulative billed): ${mrr:.2f}\n"
-        f"Signals created: {metrics['signals_created']}\n"
-        f"By type: {metrics['signals_by_type']}\n"
-        f"Rejections: {metrics['rejections']}"
-    )
-    await cb.message.edit_text(text, reply_markup=back_home(
-        profile.settings.language.value, back="admin:menu"))
+    lang = profile.settings.language.value
+    text = "\n".join([
+        t("admin.analytics_title", lang), "",
+        t("admin.mrr", lang, amount=f"{mrr:.2f}"),
+        t("admin.signals_created", lang, count=metrics["signals_created"]),
+        t("admin.signals_by_type", lang, breakdown=metrics["signals_by_type"]),
+        t("admin.rejections", lang, rejections=metrics["rejections"]),
+    ])
+    await cb.message.edit_text(text, reply_markup=back_home(lang, back="admin:menu"))
     await cb.answer()
 
 
@@ -109,13 +115,15 @@ async def logs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None
         await cb.answer(t("error.unknown_command", profile.settings.language.value),
                         show_alert=True)
         return
+    lang = profile.settings.language.value
     m = ctx.analytics.engine_metrics()
-    text = ("📜 <b>System Logs (summary)</b>\n\n"
-            f"API failures: {m.get('api_failures', {})}\n"
-            f"Rejected prices: {m.get('rejected_prices', 0)}\n"
-            f"Outliers: {m.get('outliers', 0)}")
-    await cb.message.edit_text(text, reply_markup=back_home(
-        profile.settings.language.value, back="admin:menu"))
+    text = "\n".join([
+        t("admin.logs_title", lang), "",
+        t("admin.api_failures", lang, failures=m.get("api_failures", {})),
+        t("admin.rejected_prices", lang, count=m.get("rejected_prices", 0)),
+        t("admin.outliers", lang, count=m.get("outliers", 0)),
+    ])
+    await cb.message.edit_text(text, reply_markup=back_home(lang, back="admin:menu"))
     await cb.answer()
 
 
@@ -124,16 +132,19 @@ async def support_queue(cb: CallbackQuery, ctx: BotContext, profile: UserProfile
     if not _is_staff(profile):
         await cb.answer()
         return
+    lang = profile.settings.language.value
     tickets = await ctx.admin.open_tickets()
     b = InlineKeyboardBuilder()
-    lines = ["🆘 <b>Support Queue</b>", ""]
+    lines = [t("admin.support_title", lang), ""]
     for ticket in tickets[:10]:
-        lines.append(f"#{ticket.id} [{ticket.status}] user {ticket.user_id}: {ticket.subject}")
-        b.button(text=f"Reply #{ticket.id}", callback_data=f"admin:reply:{ticket.id}")
+        lines.append(t("admin.ticket_line", lang, id=ticket.id, status=ticket.status,
+                       user_id=ticket.user_id, subject=ticket.subject))
+        b.button(text=t("admin.ticket_reply_btn", lang, id=ticket.id),
+                 callback_data=f"admin:reply:{ticket.id}")
     if not tickets:
-        lines.append("No open tickets.")
+        lines.append(t("admin.no_tickets", lang))
     b.adjust(1)
-    b.row(*back_home(profile.settings.language.value, back="admin:menu").inline_keyboard[0])
+    b.row(*back_home(lang, back="admin:menu").inline_keyboard[0])
     await cb.message.edit_text("\n".join(lines), reply_markup=b.as_markup())
     await cb.answer()
 
@@ -146,7 +157,8 @@ async def reply_start(cb: CallbackQuery, profile: UserProfile, state: FSMContext
     ticket_id = int(cb.data.split(":")[-1])
     await state.set_state(AdminStates.awaiting_reply)
     await state.update_data(ticket_id=ticket_id)
-    await cb.message.answer(f"Type your reply to ticket #{ticket_id} (or /cancel):")
+    await cb.message.answer(t("admin.reply_prompt", profile.settings.language.value,
+                              id=ticket_id))
     await cb.answer()
 
 
@@ -158,15 +170,19 @@ async def reply_send(message: Message, ctx: BotContext, profile: UserProfile,
     ticket_id = data["ticket_id"]
     user_id = await ctx.admin.reply_ticket(ticket_id, profile.telegram_user_id,
                                             message.text.strip())
+    lang = profile.settings.language.value
     if user_id:
+        # The recipient reads their own language, not the replying admin's.
+        target = await ctx.users.get(user_id)
+        target_lang = (target.settings.language.value if target else lang)
         try:
-            await bot.send_message(
-                user_id, f"🆘 <b>Support</b>: {message.text.strip()}")
+            await bot.send_message(user_id, t("support.reply_prefix", target_lang,
+                                              message=message.text.strip()))
         except Exception:  # noqa: BLE001
             pass
-        await message.answer(f"✅ Replied to ticket #{ticket_id}.")
+        await message.answer(t("admin.replied", lang, id=ticket_id))
     else:
-        await message.answer("Ticket not found.")
+        await message.answer(t("admin.ticket_not_found", lang))
 
 
 @router.callback_query(F.data == "admin:users")
@@ -175,7 +191,7 @@ async def users_prompt(cb: CallbackQuery, profile: UserProfile, state: FSMContex
         await cb.answer()
         return
     await state.set_state(AdminStates.awaiting_user_lookup)
-    await cb.message.answer("Send a Telegram user_id or @username to look up (or /cancel):")
+    await cb.message.answer(t("admin.lookup_prompt", profile.settings.language.value))
     await cb.answer()
 
 
@@ -185,23 +201,29 @@ async def users_lookup(message: Message, ctx: BotContext, profile: UserProfile,
     await state.clear()
     if not _is_staff(profile):
         return
+    lang = profile.settings.language.value
     target = await ctx.admin.lookup(message.text.strip())
     if target is None:
-        await message.answer("User not found.")
+        await message.answer(t("admin.user_not_found", lang))
         return
     b = InlineKeyboardBuilder()
     action = "reactivate" if target.suspended else "suspend"
-    b.button(text=f"{'✅ Reactivate' if target.suspended else '⛔ Suspend'}",
+    b.button(text=t("admin.reactivate_btn" if target.suspended else "admin.suspend_btn", lang),
              callback_data=f"admin:usr:{action}:{target.telegram_user_id}")
-    b.button(text="⬆️ Set Pro", callback_data=f"admin:usr:pro:{target.telegram_user_id}")
-    b.button(text="♻️ Reset Filters", callback_data=f"admin:usr:resetf:{target.telegram_user_id}")
+    b.button(text=t("admin.set_pro_btn", lang),
+             callback_data=f"admin:usr:pro:{target.telegram_user_id}")
+    b.button(text=t("admin.reset_filters_btn", lang),
+             callback_data=f"admin:usr:resetf:{target.telegram_user_id}")
     b.adjust(1)
-    text = (
-        f"👤 <b>User {target.telegram_user_id}</b>\n"
-        f"@{target.username or '—'} · role {target.role.value}\n"
-        f"Tier: {target.effective_tier.value} · Suspended: {target.suspended}\n"
-        f"Onboarded: {target.onboarding_complete}"
-    )
+    yes_no = (t("admin.yes", lang), t("admin.no", lang))
+    text = "\n".join([
+        t("admin.user_title", lang, user_id=target.telegram_user_id),
+        t("admin.user_role", lang, username=target.username or "—", role=target.role.value),
+        t("admin.user_tier", lang, tier=tier_label(target.effective_tier, lang),
+          suspended=yes_no[0] if target.suspended else yes_no[1]),
+        t("admin.user_onboarded", lang,
+          onboarded=yes_no[0] if target.onboarding_complete else yes_no[1]),
+    ])
     await message.answer(text, reply_markup=b.as_markup())
 
 
@@ -213,7 +235,7 @@ async def user_action(cb: CallbackQuery, profile: UserProfile, state: FSMContext
     _, _, action, target_id = cb.data.split(":")
     await state.set_state(AdminStates.awaiting_reason)
     await state.update_data(action=action, target=int(target_id))
-    await cb.message.answer("Enter a reason for this action (required, audited):")
+    await cb.message.answer(t("admin.reason_prompt", profile.settings.language.value))
     await cb.answer()
 
 
@@ -232,7 +254,8 @@ async def apply_action(message: Message, ctx: BotContext, profile: UserProfile,
         ok = await ctx.admin.override_tier(admin_id, target, SubscriptionTier.PRO, reason)
     elif action == "resetf":
         ok = await ctx.admin.reset_filters(admin_id, target, reason)
-    await message.answer("✅ Done (audited)." if ok else "Failed — user not found.")
+    lang = profile.settings.language.value
+    await message.answer(t("admin.action_done" if ok else "admin.action_failed", lang))
 
 
 @router.callback_query(F.data == "admin:subs")
@@ -240,11 +263,13 @@ async def subs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None
     if not _is_staff(profile):
         await cb.answer()
         return
+    lang = profile.settings.language.value
     mrr = await ctx.admin.mrr()
     await cb.message.edit_text(
-        f"💳 <b>Subscription Management</b>\n\nMRR (billed): ${mrr:.2f}\n"
-        "Look up a user via 👥 User Management to grant/comp/downgrade.",
-        reply_markup=back_home(profile.settings.language.value, back="admin:menu"))
+        "\n".join([t("admin.subs_title", lang), "",
+                   t("admin.subs_mrr", lang, amount=f"{mrr:.2f}"),
+                   t("admin.subs_hint", lang)]),
+        reply_markup=back_home(lang, back="admin:menu"))
     await cb.answer()
 
 
@@ -255,9 +280,10 @@ async def broadcast_start(cb: CallbackQuery, profile: UserProfile, state: FSMCon
         return
     await state.set_state(AdminStates.awaiting_broadcast)
     await state.update_data(target_type="all", target_value=None)
-    note = ("Support role: only pre-approved templates are sent."
+    lang = profile.settings.language.value
+    note = (t("admin.broadcast_support_note", lang)
             if profile.role == UserRole.SUPPORT else "")
-    await cb.message.answer(f"Type the broadcast message (targets: All Users). {note}\n(/cancel)")
+    await cb.message.answer(t("admin.broadcast_prompt", lang, note=note))
     await cb.answer()
 
 
@@ -269,15 +295,15 @@ async def broadcast_preview(message: Message, ctx: BotContext, profile: UserProf
     creation = await ctx.admin.create_broadcast(
         profile.telegram_user_id, "all", None, message.text.strip(),
         is_template=is_support, is_support=is_support)
+    lang = profile.settings.language.value
     b = InlineKeyboardBuilder()
-    b.button(text="✅ Confirm & Send", callback_data=f"admin:bcast_confirm:{creation.job_id}")
-    b.button(text="❌ Cancel", callback_data="admin:menu")
+    b.button(text=t("admin.broadcast_confirm_btn", lang),
+             callback_data=f"admin:bcast_confirm:{creation.job_id}")
+    b.button(text=t("admin.broadcast_cancel_btn", lang), callback_data="admin:menu")
     b.adjust(1)
-    warn = ("\n⚠️ Large audience — a second Administrator must confirm (two-person rule)."
-            if creation.needs_second_admin else "")
-    await message.answer(
-        f"📢 <b>Preview</b> → {creation.recipients} recipients{warn}\n\n{message.text.strip()}",
-        reply_markup=b.as_markup())
+    warn = t("admin.broadcast_warning", lang) if creation.needs_second_admin else ""
+    preview = t("admin.broadcast_preview", lang, recipients=creation.recipients, warning=warn)
+    await message.answer(f"{preview}\n\n{message.text.strip()}", reply_markup=b.as_markup())
 
 
 @router.callback_query(F.data.startswith("admin:bcast_confirm:"))
@@ -288,9 +314,9 @@ async def broadcast_confirm(cb: CallbackQuery, ctx: BotContext, profile: UserPro
         return
     job_id = int(cb.data.split(":")[-1])
     ready = await ctx.admin.confirm_broadcast(job_id, profile.telegram_user_id)
+    lang = profile.settings.language.value
     if not ready:
-        await cb.answer("Recorded. Awaiting a second Administrator's confirmation.",
-                        show_alert=True)
+        await cb.answer(t("admin.broadcast_second_admin", lang), show_alert=True)
         return
     recipients = await ctx.admin.recipients_for(job_id)
     sent = 0
@@ -300,5 +326,5 @@ async def broadcast_confirm(cb: CallbackQuery, ctx: BotContext, profile: UserPro
             sent += 1
         except Exception:  # noqa: BLE001
             continue
-    await cb.message.edit_text(f"✅ Broadcast sent to {sent} users.")
+    await cb.message.edit_text(t("admin.broadcast_sent", lang, count=sent))
     await cb.answer()

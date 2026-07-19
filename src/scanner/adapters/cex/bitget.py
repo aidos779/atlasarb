@@ -5,7 +5,14 @@ from decimal import Decimal
 
 import aiohttp
 
-from src.domain.market import BookLevel, CanonicalSymbol, FundingRate, OrderBook, PriceQuote
+from src.domain.market import (
+    BookLevel,
+    CanonicalSymbol,
+    FundingRate,
+    OrderBook,
+    PriceQuote,
+    is_supported_quote,
+)
 from src.scanner.adapters.base_cex import BaseCexAdapter
 
 
@@ -34,7 +41,7 @@ class BitgetAdapter(BaseCexAdapter):
             if s.get("status") != "online":
                 continue
             quote = s.get("quoteCoin")
-            if quote not in ("USDT", "USDC"):
+            if not is_supported_quote(quote or ""):
                 continue
             out.append(self._canonical(s["baseCoin"], quote))
         return out

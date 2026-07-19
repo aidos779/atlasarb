@@ -13,7 +13,7 @@ from src.services.signal_registry import SignalRegistry
 _ALIASES = {
     "tether": "USDT", "usdt": "USDT", "bitcoin": "BTC", "btc": "BTC",
     "ethereum": "ETH", "eth": "ETH", "solana": "SOL", "sol": "SOL",
-    "ethereumpow": "ETHW", "usdcoin": "USDC", "usdc": "USDC",
+    "ethereumpow": "ETHW",
 }
 
 

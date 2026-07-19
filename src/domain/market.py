@@ -9,7 +9,28 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from src.domain.enums import VenueType
+from src.domain.enums import QuoteAsset, VenueType
+
+#: The only quote asset the scanner supports (§3.6, R-QUOTE-1). Anything else — USDC
+#: above all — is dropped before it can consume a subscription or a cache slot.
+SUPPORTED_QUOTE = QuoteAsset.USDT.value
+
+
+def is_supported_quote(quote_asset: str) -> bool:
+    return quote_asset.upper() == SUPPORTED_QUOTE
+
+
+def is_supported_pair(pair: str) -> bool:
+    """Guard for raw venue symbols entering the pipeline.
+
+    Venues spell the same market several ways ("BTC/USDC", "BTC-USDC", "BTCUSDC"), so
+    matching on the normalized quote alone is not enough at the ingest boundary — this
+    rejects every spelling before discovery hands the pair to the collector.
+    """
+    normalized = pair.upper().replace("-", "/").replace("_", "/")
+    if "/" in normalized:
+        return normalized.rsplit("/", 1)[1] == SUPPORTED_QUOTE
+    return normalized.endswith(SUPPORTED_QUOTE)
 
 
 @dataclass(frozen=True)
@@ -17,7 +38,7 @@ class CanonicalSymbol:
     """Scanner §3.3 canonical internal representation."""
 
     base_asset: str            # uppercased, alias-resolved
-    quote_asset: str           # USDT | USDC
+    quote_asset: str           # always USDT (§3.6)
     venue_type: VenueType
     network: str | None = None  # required for DEX; None for CEX
 

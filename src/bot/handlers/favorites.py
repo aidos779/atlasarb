@@ -6,10 +6,10 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
-from src.bot.i18n import t
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import favorites_hub
 from src.domain.user import UserProfile
+from src.i18n import t, translations_of
 
 router = Router(name="favorites")
 
@@ -32,7 +32,7 @@ async def cmd_favorites(message: Message, profile: UserProfile) -> None:
     await _show_hub(message, profile)
 
 
-@router.message(F.text.in_({"⭐ Favorites", "⭐ Избранное", "⭐ Таңдаулылар"}))
+@router.message(F.text.in_(translations_of("menu.favorites")))
 async def reply_favorites(message: Message, profile: UserProfile) -> None:
     await _show_hub(message, profile)
 
@@ -52,7 +52,7 @@ async def list_favorites(cb: CallbackQuery, ctx: BotContext, profile: UserProfil
     rows = await ctx.favorites.list(profile.telegram_user_id, kind)
     title = t(_KIND_TITLE[kind], lang)
     if not rows:
-        body = f"{title}\n\n—"
+        body = f"{title}\n\n{t('favorites.empty', lang)}"
     else:
         lines = [f"{'🔒 ' if r.frozen else ''}{r.value}" for r in rows]
         body = f"{title}\n\n" + "\n".join(lines)

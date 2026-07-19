@@ -10,20 +10,22 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.context import BotContext
 from src.bot.handlers.common import render_signal_list
-from src.bot.i18n import t
 from src.bot.keyboards.screens import filters_panel, multiselect, numeric_editor
 from src.bot.states.states import FilterStates
 from src.domain.entitlements import entitlements_for
 from src.domain.enums import ArbitrageType, Network
 from src.domain.user import UserFilter, UserProfile
+from src.i18n import filter_label, t, tier_label
 
 router = Router(name="filters")
 
 _NUMERIC = {"min_profit", "liquidity", "signal_age", "risk"}
 _STEP = {"min_profit": Decimal("0.1"), "liquidity": Decimal("500"),
          "signal_age": Decimal("15"), "risk": Decimal("1")}
-_TIER_NAME = {"network": "Basic", "liquidity": "Basic", "arbitrage_type": "Basic",
-              "risk": "Pro", "signal_age": "Pro"}
+# Minimum tier each gated filter requires — rendered via tier_label so the upsell
+# names the plan in the user's language.
+_TIER_NAME = {"network": "basic", "liquidity": "basic", "arbitrage_type": "basic",
+              "risk": "pro", "signal_age": "pro"}
 
 
 def _get_numeric(profile: UserProfile, field: str) -> Decimal:
@@ -61,17 +63,19 @@ async def edit_filter(cb: CallbackQuery, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     ent = entitlements_for(profile.effective_tier)
     if not ent.filter_allowed(field):
-        await cb.answer(t("filters.upsell", lang, filter=field.replace("_", " ").title(),
-                          tier=_TIER_NAME.get(field, "Basic")), show_alert=True)
+        await cb.answer(t("filters.upsell", lang, filter=filter_label(field, lang),
+                          tier=tier_label(_TIER_NAME.get(field, "basic"), lang)),
+                        show_alert=True)
         return
     if field in _NUMERIC:
         await cb.message.edit_text(
-            f"Edit {field.replace('_', ' ').title()}:",
+            t("filters.edit_prompt", lang, field=filter_label(field, lang)),
             reply_markup=numeric_editor(field, str(_get_numeric(profile, field)), lang))
     else:
         options, selected = _multiselect_options(field, profile, ctx_engine=None)
-        await cb.message.edit_text(f"Select {field.replace('_', ' ').title()}:",
-                                   reply_markup=multiselect(field, options, selected, lang))
+        await cb.message.edit_text(
+            t("filters.select_prompt", lang, field=filter_label(field, lang)),
+            reply_markup=multiselect(field, options, selected, lang))
     await cb.answer()
 
 
@@ -107,8 +111,9 @@ async def type_filter(cb: CallbackQuery, profile: UserProfile, state: FSMContext
     field = cb.data.split(":")[-1]
     await state.set_state(FilterStates.awaiting_value)
     await state.update_data(field=field)
-    await cb.message.answer(f"Type a value for {field.replace('_', ' ').title()} "
-                            f"(or /cancel):")
+    lang = profile.settings.language.value
+    await cb.message.answer(
+        t("filters.type_prompt", lang, field=filter_label(field, lang)))
     await cb.answer()
 
 
@@ -125,8 +130,8 @@ async def typed_value(message: Message, ctx: BotContext, profile: UserProfile,
         return
     _set_numeric(profile, field, value)
     await ctx.users.save(profile)
-    await message.answer(t("settings.updated", profile.settings.language.value,
-                           field=field.replace("_", " ").title(),
+    lang = profile.settings.language.value
+    await message.answer(t("settings.updated", lang, field=filter_label(field, lang),
                            value=str(_get_numeric(profile, field))))
 
 
@@ -139,7 +144,7 @@ async def toggle_multiselect(cb: CallbackQuery, ctx: BotContext, profile: UserPr
         key = next((n.value for n in Network if n.display == value), value)
         f.networks = _toggle(f.networks, key)
     elif field == "arbitrage_type":
-        current = {t.value for t in f.arb_types}
+        current = {a.value for a in f.arb_types}
         toggled = _toggle(frozenset(current), value)
         f.arb_types = frozenset(ArbitrageType(v) for v in toggled)
     elif field == "exchange":
@@ -147,16 +152,18 @@ async def toggle_multiselect(cb: CallbackQuery, ctx: BotContext, profile: UserPr
         ent = entitlements_for(profile.effective_tier)
         newset = _toggle(f.exchanges, value)
         if ent.tier.value == "free" and len(newset) > 1:
-            await cb.answer(t("filters.upsell", lang, filter="Multiple Exchanges",
-                              tier="Basic"), show_alert=True)
+            await cb.answer(t("filters.upsell", lang,
+                              filter=t("filters.multiple_exchanges", lang),
+                              tier=tier_label("basic", lang)), show_alert=True)
             return
         f.exchanges = newset
     else:  # coin
         ent = entitlements_for(profile.effective_tier)
         newset = _toggle(f.coins, value)
         if ent.tier.value == "free" and len(newset) > 3:
-            await cb.answer(t("filters.upsell", lang, filter="More Coins", tier="Basic"),
-                            show_alert=True)
+            await cb.answer(t("filters.upsell", lang,
+                              filter=t("filters.more_coins", lang),
+                              tier=tier_label("basic", lang)), show_alert=True)
             return
         f.coins = newset
     await ctx.users.save(profile)

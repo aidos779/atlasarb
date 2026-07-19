@@ -11,7 +11,16 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, TelegramObject, User
 
+from src.i18n import DEFAULT_LANGUAGE, t
 from src.services.rate_limiter import SlidingWindowLimiter
+
+
+def _language_of(data: dict[str, Any]) -> str:
+    """Language for a throttle notice. ContextMiddleware is registered ahead of this one,
+    so the profile is normally present; fall back only if throttling fired before it
+    loaded (e.g. an update carrying no user)."""
+    profile = data.get("profile")
+    return profile.settings.language.value if profile is not None else DEFAULT_LANGUAGE
 
 
 class ThrottleMiddleware(BaseMiddleware):
@@ -27,6 +36,7 @@ class ThrottleMiddleware(BaseMiddleware):
         tg_user: User | None = data.get("event_from_user")
         if tg_user and not self._limiter.allow(tg_user.id):
             if isinstance(event, CallbackQuery):
-                await event.answer("Slow down a moment…", show_alert=False)
+                await event.answer(t("error.slow_down", _language_of(data)),
+                                   show_alert=False)
             return None
         return await handler(event, data)

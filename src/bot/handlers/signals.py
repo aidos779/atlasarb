@@ -15,10 +15,10 @@ from aiogram.types import CallbackQuery, Message
 from src.bot.context import BotContext
 from src.bot.formatters.signal import format_details
 from src.bot.handlers.common import SESSIONS, render_signal_list
-from src.bot.i18n import t
 from src.bot.keyboards.inline import details_buttons, upsell_keyboard
 from src.domain.signal import Signal
 from src.domain.user import UserProfile
+from src.i18n import favorite_kind_label, t, translations_of
 
 router = Router(name="signals")
 
@@ -32,7 +32,7 @@ async def cmd_signals(message: Message, ctx: BotContext, profile: UserProfile) -
     await render_signal_list(message, ctx, profile)
 
 
-@router.message(F.text.in_({"📊 Signals", "📊 Сигналы", "📊 Сигналдар"}))
+@router.message(F.text.in_(translations_of("menu.signals")))
 async def reply_signals(message: Message, ctx: BotContext, profile: UserProfile) -> None:
     await cmd_signals(message, ctx, profile)
 
@@ -73,12 +73,13 @@ async def signal_favorite(cb: CallbackQuery, ctx: BotContext, profile: UserProfi
     lang = profile.settings.language.value
     outcome = await ctx.favorites.toggle(profile, "signal", signal_id)
     if outcome.cap_reached:
-        await cb.answer(t("favorites.cap", lang, kind="signal"), show_alert=True)
+        await cb.answer(t("favorites.cap", lang,
+                          kind=favorite_kind_label("signal", lang)), show_alert=True)
         return
     signal = ctx.registry.get(signal_id)
     if signal and outcome.added:
         await ctx.history.record_favorite(profile.telegram_user_id, signal)
-    await cb.answer("⭐" if outcome.added else "💔")
+    await cb.answer(t("favorites.added" if outcome.added else "favorites.removed", lang))
     # If we're on the details screen, refresh its buttons; else refresh list.
     if signal and cb.message and cb.message.text and "Signal ID" in (cb.message.text or ""):
         await cb.message.edit_reply_markup(
@@ -102,7 +103,7 @@ async def signal_details(cb: CallbackQuery, ctx: BotContext, profile: UserProfil
 @router.callback_query(F.data.startswith("sig:report:"))
 async def signal_report(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     # Feedback rolls into Admin Signal Monitoring review queue (§16.6).
-    await cb.answer("🚩 Reported — thank you. Our team will review.", show_alert=True)
+    await cb.answer(t("signals.reported", profile.settings.language.value), show_alert=True)
 
 
 async def send_details(target: Message, ctx: BotContext, profile: UserProfile,
