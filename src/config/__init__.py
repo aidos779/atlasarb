@@ -1,4 +1,10 @@
-from src.config.logging import LogThrottle, configure_logging, describe_exc, get_logger
+from src.config.logging import (
+    LogThrottle,
+    configure_logging,
+    describe_exc,
+    get_logger,
+    install_global_exception_hooks,
+)
 from src.config.scanner_config import (
     ArbType,
     ConfigError,
@@ -19,5 +25,6 @@ __all__ = [
     "describe_exc",
     "get_logger",
     "get_settings",
+    "install_global_exception_hooks",
     "validate_config",
 ]

@@ -11,7 +11,7 @@ import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.config import get_logger
+from src.config import describe_exc, get_logger
 from src.database.base import Database
 from src.database.repositories.misc_repos import NotificationRepository
 from src.database.repositories.user_repo import UserRepository
@@ -50,7 +50,7 @@ class BackgroundScheduler:
             try:
                 await self._tick()
             except Exception as exc:  # noqa: BLE001
-                log.warning("scheduler_tick_error", error=str(exc))
+                log.error("scheduler_tick_error", error=describe_exc(exc), exc_info=exc)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=60)
             except TimeoutError:

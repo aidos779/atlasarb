@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from src.config import get_logger
+from src.config import describe_exc, get_logger
 from src.database.base import Database
 from src.database.repositories.favorites_repo import FavoritesRepository
 from src.database.repositories.misc_repos import NotificationRepository
@@ -30,6 +30,18 @@ log = get_logger("services.notification")
 
 _COOLDOWN_SEC = 60
 _PROFIT_OVERRIDE_PP = Decimal("0.5")  # §18.3 ±0.5 percentage points
+
+# Consumers draining the bridge queue. One consumer serialised the whole outbound
+# pipeline behind a single signal's fan-out, so a slow pass (hundreds of users x a
+# Telegram round-trip) let the backlog grow until entries aged out. Several consumers
+# overlap those waits; the work is I/O-bound, so this costs no CPU.
+_CONSUMER_WORKERS = 4
+
+# Bound on users evaluated concurrently within one dispatch pass. Each slot holds one DB
+# session plus at most one in-flight Telegram send, so this must stay comfortably under
+# the DB pool (db_pool_size default 20) — otherwise a large pass would exhaust the pool
+# and stall every other query in the process, including the bot's own handlers.
+_USER_FANOUT = 8
 
 
 class Notifier(Protocol):
@@ -45,7 +57,7 @@ class NotificationService:
         self._config_provider = config_provider   # () -> ScannerConfig (confidence threshold)
         self._notifier: Notifier | None = None
         self._on_sent = on_sent or (lambda: None)  # telemetry hook (ENGINE STATS)
-        self._task: asyncio.Task | None = None
+        self._tasks: list[asyncio.Task] = []
         self._passes: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
 
@@ -54,31 +66,45 @@ class NotificationService:
 
     def start(self) -> None:
         self._stop.clear()
-        self._task = asyncio.create_task(self._run(), name="notification-consumer")
+        self._tasks = [
+            asyncio.create_task(self._run(worker), name=f"notification-consumer-{worker}")
+            for worker in range(_CONSUMER_WORKERS)
+        ]
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task:
-            self._task.cancel()
+        # Cancel and reap both consumers and any in-flight delayed passes. Leaving the
+        # passes to be garbage-collected surfaced as "Task exception was never retrieved"
+        # tracebacks on every shutdown, which the new asyncio hook would now (correctly
+        # but noisily) report as unhandled errors.
+        pending = [*self._tasks, *self._passes]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._tasks = []
+        self._passes.clear()
 
-    async def _run(self) -> None:
+    async def _run(self, worker: int) -> None:
         while not self._stop.is_set():
             try:
                 event, signal = await self._bridge.next_event()
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001
-                log.warning("consume_error", error=str(exc), exc_info=True)
+                log.error("consume_error", worker=worker, error=describe_exc(exc),
+                          exc_info=exc)
                 continue
             log.info("dispatcher_received", signal_id=signal.id, admit_event=event,
+                     worker=worker,
                      arb_type=signal.arb_type.value, coin=signal.coin,
                      net_profit_pct=float(round(signal.net_profit_pct, 4)),
                      queue_pending=self._bridge.pending())
             try:
                 await self._dispatch(signal)
             except Exception as exc:  # noqa: BLE001
-                log.warning("dispatch_error", signal_id=signal.id, error=str(exc),
-                            exc_info=True)
+                log.error("dispatch_error", signal_id=signal.id, worker=worker,
+                          error=describe_exc(exc), exc_info=exc)
 
     async def _dispatch(self, signal: Signal) -> None:
         # Schedule a per-tier delayed pass (§13.3). Pro=0s, Basic=10s, Free=60s.
@@ -105,8 +131,8 @@ class NotificationService:
             async with self._db.session() as session:
                 candidates = await UserRepository(session).alert_candidates()
         except Exception as exc:  # noqa: BLE001
-            log.warning("alert_candidates_failed", signal_id=signal.id, delay=delay,
-                        error=str(exc), exc_info=True)
+            log.error("alert_candidates_failed", signal_id=signal.id, delay=delay,
+                      error=describe_exc(exc), exc_info=exc)
             return
         eligible = [p for p in candidates
                     if entitlements_for(p.effective_tier).signal_delay_sec == delay]
@@ -114,20 +140,40 @@ class NotificationService:
                  arb_type=signal.arb_type.value, coin=signal.coin,
                  net_profit_pct=float(round(signal.net_profit_pct, 4)),
                  candidates=len(candidates), eligible_this_pass=len(eligible))
-        sent = 0
-        for profile in eligible:
-            try:
-                if await self._evaluate_user(profile, signal):
-                    sent += 1
-            except Exception as exc:  # noqa: BLE001
-                log.warning("user_eval_error", user_id=profile.telegram_user_id,
-                            signal_id=signal.id, error=str(exc), exc_info=True)
+
+        # Fan out across users with a bounded concurrency window. Sequential evaluation
+        # made the pass cost O(users) Telegram round-trips end to end, which is what let
+        # the bridge backlog build during a burst.
+        limiter = asyncio.Semaphore(_USER_FANOUT)
+
+        async def _one(profile: UserProfile) -> bool:
+            async with limiter:
+                # Per-user isolation: this user's failure (a bad enum, a duplicate-key
+                # race, a dead session) is contained here and never aborts, rolls back,
+                # or short-circuits any other user's evaluation in the same pass.
+                try:
+                    return await self._evaluate_user(profile, signal)
+                except Exception as exc:  # noqa: BLE001
+                    log.error("user_eval_error", user_id=profile.telegram_user_id,
+                              signal_id=signal.id, error=describe_exc(exc), exc_info=exc)
+                    return False
+
+        results = await asyncio.gather(*(_one(p) for p in eligible))
+        sent = sum(1 for ok in results if ok)
         log.info("dispatch_pass_done", signal_id=signal.id, delay=delay,
                  arb_type=signal.arb_type.value,
                  net_profit_pct=float(round(signal.net_profit_pct, 4)), delivered=sent)
 
     async def _evaluate_user(self, profile: UserProfile, signal: Signal) -> bool:
-        """Return True iff an alert was actually delivered to this user."""
+        """Return True iff an alert was actually delivered to this user.
+
+        Runs in two short, independent transactions with the Telegram round-trip between
+        them. Holding one session open across the send (as this used to) pinned a pool
+        connection for the duration of an external HTTP call — with the pass now fanning
+        out over users, that would exhaust ``db_pool_size`` and stall every other query
+        in the process. Each transaction is also this user's alone, so a failure in
+        either is isolated to them (see the caller's per-user guard).
+        """
         uid = profile.telegram_user_id
         if self._notifier is None:
             log.warning("notifier_unbound", signal_id=signal.id)
@@ -135,6 +181,7 @@ class NotificationService:
         ent = entitlements_for(profile.effective_tier)
         settings = profile.settings
 
+        # ── Phase 1 (read-only transaction): eligibility ──
         async with self._db.session() as session:
             notif_repo = NotificationRepository(session)
             fav_repo = FavoritesRepository(session)
@@ -186,33 +233,51 @@ class NotificationService:
                     return False  # still cooling down, not a significant change
 
             # Hourly cap with throttle notice (§13.3 / R-NOTIF-1).
+            notify_throttled = False
+            capped = False
             if ent.instant_alerts_per_hour != UNLIMITED:
                 since = datetime.now(UTC) - timedelta(hours=1)
                 sent = await notif_repo.alerts_in_last_hour(uid, since)
                 if sent >= ent.instant_alerts_per_hour:
+                    capped = True
+                    # The notice fires exactly once, on the alert that crosses the cap.
+                    # Record it inside this transaction so a crash before the send can
+                    # never re-notify; the send itself happens after the commit.
                     if sent == ent.instant_alerts_per_hour:
-                        await self._notifier.send_text(
-                            uid,
-                            "You've hit your hourly alert limit — more matching signals "
-                            "were found. Upgrade to Pro for unlimited alerts.")
+                        notify_throttled = True
                         await notif_repo.log(uid, "throttle_notice",
                                              "Hourly alert limit reached")
                     log.info("alert_dropped_hourly_cap", user_id=uid, signal_id=signal.id)
-                    return False
 
-            ok = await self._notifier.send_alert(uid, signal, settings.language.value)
-            if ok:
-                self._on_sent()
-                log.info("message_delivered", user_id=uid,
-                         coin=signal.coin, pair=signal.trading_pair,
-                         buy_exchange=signal.buy_exchange,
-                         sell_exchange=signal.sell_exchange,
-                         net_profit_pct=float(round(signal.net_profit_pct, 4)),
-                         signal_id=signal.id)
-                await notif_repo.log(uid, "instant_alert",
-                                     f"{signal.coin} {signal.net_profit_pct:.2f}%")
-                until = datetime.now(UTC) + timedelta(seconds=_COOLDOWN_SEC)
-                await notif_repo.set_cooldown(uid, dedup,
-                                              float(signal.net_profit_pct), until)
-                return True
+        if notify_throttled:
+            await self._notifier.send_text(
+                uid,
+                "You've hit your hourly alert limit — more matching signals "
+                "were found. Upgrade to Pro for unlimited alerts.")
+        if capped:
             return False
+
+        # ── Telegram round-trip, holding no DB connection ──
+        ok = await self._notifier.send_alert(uid, signal, settings.language.value)
+        if not ok:
+            return False
+
+        self._on_sent()
+        log.info("message_delivered", user_id=uid,
+                 coin=signal.coin, pair=signal.trading_pair,
+                 buy_exchange=signal.buy_exchange,
+                 sell_exchange=signal.sell_exchange,
+                 net_profit_pct=float(round(signal.net_profit_pct, 4)),
+                 signal_id=signal.id)
+
+        # ── Phase 2 (write transaction): record delivery + arm the cooldown ──
+        # set_cooldown is an atomic UPSERT on (user_id, dedup_key), so two passes racing
+        # on the same signal reconcile instead of raising UniqueViolationError.
+        async with self._db.session() as session:
+            notif_repo = NotificationRepository(session)
+            await notif_repo.log(uid, "instant_alert",
+                                 f"{signal.coin} {signal.net_profit_pct:.2f}%")
+            until = datetime.now(UTC) + timedelta(seconds=_COOLDOWN_SEC)
+            await notif_repo.set_cooldown(uid, dedup,
+                                          float(signal.net_profit_pct), until)
+        return True

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 
 import certifi
 
@@ -32,7 +33,13 @@ from src.bot.handlers import register_handlers
 from src.bot.middlewares.context import ContextMiddleware
 from src.bot.middlewares.throttle import ThrottleMiddleware
 from src.bot.notifier import TelegramNotifier
-from src.config import configure_logging, get_logger, get_settings
+from src.config import (
+    configure_logging,
+    describe_exc,
+    get_logger,
+    get_settings,
+    install_global_exception_hooks,
+)
 from src.config.scanner_config import ConfigManager, ScannerConfig
 from src.database.base import Database
 from src.database.repositories.history_repo import HistoryRepository
@@ -89,6 +96,25 @@ async def _on_telegram_bad_request(event: ErrorEvent) -> bool:
     raise event.exception  # not ours — let aiogram log it as before
 
 
+def _verify_production_config(settings) -> None:
+    """Fail fast on a misconfigured production boot (no-op elsewhere).
+
+    Booting production on dev defaults is worse than not booting at all: a SQLite-backed
+    deployment silently loses every user on restart, and a "change-me" webhook secret
+    lets anyone forge a payment callback. Both look like application bugs weeks later
+    rather than the deploy mistake they are. Refuse to start instead, naming every
+    problem at once so a broken deploy is fixed in one pass.
+    """
+    errors = settings.production_config_errors()
+    if not errors:
+        return
+    log.critical("production_config_invalid", environment=settings.environment,
+                 error_count=len(errors), errors=errors)
+    for problem in errors:
+        log.critical("production_config_error", problem=problem)
+    sys.exit(1)
+
+
 def _environment_config_layer(environment: str) -> dict:
     """§20.6 environment-specific config layer — wider tolerances in non-prod."""
     if environment.lower() in ("development", "staging"):
@@ -116,12 +142,17 @@ class Application:
     def __init__(self) -> None:
         self.settings = get_settings()
         configure_logging(self.settings.log_level, self.settings.log_json)
+        install_global_exception_hooks()
         # Dev-build paywall removal: outside production, every user gets full PRO
         # access to all tier-gated features. Production keeps the real paywall.
         set_unlimited_access(not self.settings.is_production)
         if not self.settings.is_production:
             log.warning("dev_unlimited_access_enabled",
                         note="all users have full PRO access (paywall disabled)")
+        else:
+            log.info("paywall_enforced", environment=self.settings.environment)
+        # Preflight AFTER the paywall toggle so the check sees the state it validates.
+        _verify_production_config(self.settings)
         self.config_manager = ConfigManager(ScannerConfig())
         self.config_manager.apply_environment_layer(
             _environment_config_layer(self.settings.environment))
@@ -191,6 +222,10 @@ class Application:
         self.dp.workflow_data.update(ctx=self.ctx, bot=self.bot)
 
     async def run(self) -> None:
+        # Re-install now that a loop exists: the constructor runs before asyncio.run()
+        # creates one, so the loop-level handler (orphaned-task tracebacks) can only be
+        # attached here.
+        install_global_exception_hooks(asyncio.get_running_loop())
         await self.database.create_all()
         notifier = TelegramNotifier(self.bot, self.ctx.users, self.fx, self.registry)
         self.notifications.bind_notifier(notifier)
@@ -223,8 +258,17 @@ class Application:
 
 
 def main() -> None:
-    app = Application()
-    asyncio.run(app.run())
+    # Outermost net. sys.excepthook does not cover an exception escaping asyncio.run(),
+    # so without this the process's final traceback is the one thing that still reached
+    # stderr unstructured — precisely the record an operator most needs parsed.
+    try:
+        app = Application()
+        asyncio.run(app.run())
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 — log, then exit non-zero
+        log.critical("fatal_startup_error", error=describe_exc(exc), exc_info=exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

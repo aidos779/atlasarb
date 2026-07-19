@@ -5,8 +5,10 @@ error middleware sanitizes user-facing messages separately (NFR-SEC: error sanit
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+import threading
 import time
 
 import structlog
@@ -44,6 +46,84 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
+
+
+_hooks_installed = False
+
+
+def install_global_exception_hooks(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Route every unhandled exception through structlog instead of raw stderr.
+
+    Three escape hatches existed for a traceback to reach stderr unstructured — and in
+    JSON-log deployments an unstructured traceback is unparseable noise that no alert
+    rule can match:
+
+      * ``sys.excepthook``          — a crash on the main thread (e.g. out of ``main()``)
+      * ``threading.excepthook``   — a crash inside any worker thread
+      * the asyncio exception handler — a task that died with nobody awaiting it, and
+        "Task exception was never retrieved" at GC time
+
+    All three now emit a single ``[error]``-level structured record carrying the full
+    traceback in ``exc_info``. ``KeyboardInterrupt`` is deliberately passed through to
+    the default hook so Ctrl-C stays a clean, quiet shutdown rather than an error.
+
+    Idempotent — safe to call from both the composition root and tests.
+    """
+    global _hooks_installed
+    log = get_logger("unhandled")
+
+    def _sys_excepthook(exc_type, exc, tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        log.error("unhandled_exception", scope="main_thread",
+                  error=describe_exc(exc), exc_info=(exc_type, exc, tb))
+
+    def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+        if issubclass(args.exc_type, SystemExit):
+            return
+        log.error("unhandled_exception", scope="thread",
+                  thread=getattr(args.thread, "name", None),
+                  error=describe_exc(args.exc_value) if args.exc_value else args.exc_type.__name__,
+                  exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = _sys_excepthook
+    threading.excepthook = _thread_excepthook
+
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+    if loop is not None:
+        loop.set_exception_handler(_asyncio_exception_handler)
+    _hooks_installed = True
+
+
+def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """asyncio loop hook — the one that catches orphaned-task tracebacks.
+
+    A background task that raises with no one awaiting it (every ``create_task`` in the
+    scanner/notification pipeline) surfaces here. Previously that printed a bare
+    traceback to stderr at GC time with no signal id, no task name, and no severity tag.
+    """
+    log = get_logger("unhandled")
+    exc = context.get("exception")
+    task = context.get("task") or context.get("future")
+    fields = {
+        "scope": "asyncio",
+        "message": context.get("message", ""),
+        "task": getattr(task, "get_name", lambda: None)() if task is not None else None,
+    }
+    if isinstance(exc, asyncio.CancelledError):
+        # Cooperative shutdown, not a failure — every stop() cancels its task.
+        log.debug("task_cancelled", **fields)
+        return
+    if exc is not None:
+        log.error("unhandled_task_exception", error=describe_exc(exc), exc_info=exc,
+                  **fields)
+    else:
+        log.error("asyncio_loop_error", **fields)
 
 
 class LogThrottle:

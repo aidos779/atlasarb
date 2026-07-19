@@ -89,10 +89,38 @@ class MarketCollector:
             # for monitoring, but it never drives maintenance/offline on its own.
             if self._health is not None:
                 self._health.record_discovery(venue)
+            markets = self._filter_ambiguous(venue, markets)
             current = {m.pair for m in markets if m.quote_asset in ("USDT", "USDC")}
             await self._apply_discovery(venue, adapter, markets, current)
         # Refresh priority top-100 from breadth of tracked pairs (proxy).
         self._priority.set_top100({p.split("/")[0] for p in self.tracked_pairs()})
+
+    def _filter_ambiguous(self, venue: str,
+                          markets: list[CanonicalSymbol]) -> list[CanonicalSymbol]:
+        """Drop base assets whose ticker maps to a DIFFERENT token per venue (BR-ASSET-1).
+
+        A ticker collision (the canonical case: "AI" is one token on Binance and an
+        unrelated one on OKX) has no shared identity, so any cross-venue "spread" on it
+        is fictional. The CexCex detector already rejects these at the identity level,
+        but that is the last line of defence — by then the pair has consumed a scarce WS
+        subscription slot on every venue, and a slot spent on a pair that can never
+        produce a signal is a slot denied to one that can.
+
+        Filtering at discovery means the collision never enters the tracked set at all:
+        no subscription, no cache entry, no per-tick heuristic. The denylist is
+        ``ScannerConfig.ambiguous_tickers`` — hot-reloadable via update_config, so a
+        newly observed collision can be retired without a redeploy.
+        """
+        blacklist = self._config.ambiguous_tickers
+        if not blacklist:
+            return markets
+        kept = [m for m in markets if m.base_asset not in blacklist]
+        dropped = len(markets) - len(kept)
+        if dropped:
+            log.info("ambiguous_tickers_skipped", venue=venue, dropped=dropped,
+                     tickers=sorted({m.base_asset for m in markets
+                                     if m.base_asset in blacklist}))
+        return kept
 
     async def _apply_discovery(
         self, venue: str, adapter: ExchangeAdapter,

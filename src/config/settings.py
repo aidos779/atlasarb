@@ -89,6 +89,10 @@ _ALCHEMY_SUBDOMAIN: dict[str, str] = {
 }
 
 
+# Development default for BOT_TOKEN — treated as "unset" by the production preflight.
+_PLACEHOLDER_BOT_TOKEN = "TEST:TOKEN"
+
+
 def _split_csv(value: str | list[str] | None) -> list[str]:
     if not value:
         return []
@@ -135,7 +139,7 @@ class Settings(BaseSettings):
     log_json: bool = False
 
     # ── Telegram ──
-    bot_token: str = "TEST:TOKEN"
+    bot_token: str = _PLACEHOLDER_BOT_TOKEN
     bot_username: str = "arb_bot"
     telegram_webhook_secret: str = "change-me"
     admin_user_ids: list[int] = Field(default_factory=list)
@@ -245,6 +249,60 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
+
+    def production_config_errors(self) -> list[str]:
+        """Fatal misconfigurations for a production boot — empty list means safe to start.
+
+        Every default in this class is a *development* default: a placeholder bot token,
+        a local SQLite file, literal "change-me" secrets. Each one boots silently and
+        fails later in a way that looks like a bug rather than a deploy mistake — a
+        SQLite-backed prod loses every user row on container restart, and a "change-me"
+        webhook secret means anyone can forge a payment callback.
+
+        Returns human-readable reasons rather than raising so the caller can log all of
+        them at once; a half-fixed deploy should not require N restarts to find N errors.
+        Non-production environments are never checked — they are expected to use defaults.
+        """
+        if not self.is_production:
+            return []
+        errors: list[str] = []
+
+        if not self.bot_token or self.bot_token == _PLACEHOLDER_BOT_TOKEN:
+            errors.append("BOT_TOKEN is unset or still the placeholder value")
+        elif ":" not in self.bot_token:
+            errors.append("BOT_TOKEN is malformed (expected '<id>:<secret>')")
+
+        if self.database_url.startswith("sqlite"):
+            errors.append(
+                "DATABASE_URL points at SQLite — production requires PostgreSQL "
+                "(a container restart would discard every user, subscription and signal)")
+        elif not self.database_url.strip():
+            errors.append("DATABASE_URL is unset")
+
+        for field_name, env_name, placeholder in (
+            ("telegram_webhook_secret", "TELEGRAM_WEBHOOK_SECRET", "change-me"),
+            ("payment_webhook_secret", "PAYMENT_WEBHOOK_SECRET", "change-me-payment"),
+        ):
+            value = getattr(self, field_name)
+            if not value or value == placeholder:
+                errors.append(f"{env_name} is unset or still the default placeholder")
+
+        if not self.admin_user_ids:
+            errors.append(
+                "ADMIN_USER_IDS is empty — no operator could reach the admin panel")
+
+        if not self.redis_url.strip():
+            errors.append("REDIS_URL is unset")
+
+        # Conflicting configuration: the dev paywall bypass must never be reachable in
+        # production. It is keyed off `is_production` at the composition root, so this
+        # is a belt-and-braces assertion that the two never disagree.
+        from src.domain.dev_mode import unlimited_access_enabled
+        if unlimited_access_enabled():
+            errors.append(
+                "unlimited (paywall-free) access is enabled while ENVIRONMENT=production")
+
+        return errors
 
     def _primary_rpc_urls(self, network: str) -> list[str]:
         """Paid/authenticated primary-tier endpoints for a network, highest-priority first.

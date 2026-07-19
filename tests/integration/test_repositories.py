@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -90,3 +91,26 @@ async def test_set_cooldown_is_idempotent_upsert(database):
         row = await NotificationRepository(s).get_cooldown(88, "ETH/USDT|binance|okx")
     assert row is not None
     assert float(row.last_net_pct) == pytest.approx(0.42)  # last writer won, no error
+
+
+async def test_concurrent_cooldown_writers_do_not_raise(database):
+    """The real shape of the prod defect: the 0s/10s/60s passes for one signal land on
+    the same (user_id, dedup_key) *in flight*, each in its own session. Sequential writes
+    would not reproduce it — overlapping ones do. None may raise IntegrityError."""
+    async with database.session() as s:
+        await UserRepository(s).get_or_create(89, "dave", "Dave")
+    until = datetime.now(UTC) + timedelta(seconds=60)
+
+    async def _write(net: float) -> None:
+        async with database.session() as s:
+            await NotificationRepository(s).set_cooldown(89, "BTC/USDT|binance|okx",
+                                                         net, until)
+
+    results = await asyncio.gather(*(_write(n) for n in (0.1, 0.2, 0.3, 0.4, 0.5)),
+                                   return_exceptions=True)
+    errors = [r for r in results if isinstance(r, BaseException)]
+    assert errors == [], f"concurrent UPSERT raised: {errors}"
+
+    async with database.session() as s:
+        row = await NotificationRepository(s).get_cooldown(89, "BTC/USDT|binance|okx")
+    assert row is not None                       # exactly one row, not five
