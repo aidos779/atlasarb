@@ -13,6 +13,7 @@ from decimal import Decimal
 from src.domain.enums import VenueType
 from src.domain.signal import Candidate
 from src.scanner.cache.market_state_cache import MarketStateCache
+from src.scanner.monitoring.detector_stats import DetectorCounters
 from src.scanner.status.health_registry import HealthRegistry
 
 
@@ -70,6 +71,13 @@ class DetectionContext:
 
 class Detector(ABC):
     arb_type: str
+
+    def __init__(self) -> None:
+        # Per-detector runtime counters (§17 diagnostics). Owned by the detector so the
+        # hot path is a plain in-place int increment; the engine aggregates and resets
+        # them once a minute via DetectorStats. Subclasses with their own __init__ must
+        # call super().__init__().
+        self.counters = DetectorCounters()
 
     @abstractmethod
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:

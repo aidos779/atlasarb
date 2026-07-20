@@ -67,6 +67,11 @@ class Metrics:
         "NO_BRIDGE_ROUTE": "risk", "BRIDGE_TIME_EXCEEDED": "risk",
     }
 
+    @classmethod
+    def reject_bucket(cls, reason: str) -> str:
+        """Coarse bucket for a RejectReason. Unknown reasons count as risk."""
+        return cls._REJECT_BUCKET.get(reason, "risk")
+
     def rejections_by_bucket(self) -> dict[str, int]:
         buckets = {"fees": 0, "spread": 0, "liquidity": 0, "freshness": 0, "risk": 0}
         for reason, count in self.rejections.items():

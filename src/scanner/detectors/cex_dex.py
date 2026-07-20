@@ -18,6 +18,7 @@ class CexDexDetector(Detector):
     arb_type = ArbitrageType.CEX_DEX.value
 
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:
+        self.counters.opportunities_checked += 1
         if base_asset not in ctx.verified_tokens:
             return []
         pair = f"{base_asset}/{quote_asset}"
@@ -54,7 +55,10 @@ class CexDexDetector(Detector):
                                         pool_address=dex_book.pool_address),
                         gross_spread_pct=gross_a,
                     ))
-                elif gross_b > 0:
+                elif gross_b <= 0:
+                    # Neither direction shows a positive gross spread on this venue pair.
+                    self.counters.rejected_by_spread += 1
+                else:
                     candidates.append(Candidate(
                         arb_type=ArbitrageType.CEX_DEX, base_asset=base_asset,
                         quote_asset=quote_asset, network=network,

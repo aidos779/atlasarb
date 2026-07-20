@@ -17,6 +17,7 @@ class DexDexDetector(Detector):
     arb_type = ArbitrageType.DEX_DEX.value
 
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:
+        self.counters.opportunities_checked += 1
         if base_asset not in ctx.verified_tokens:
             return []
         pair = f"{base_asset}/{quote_asset}"
@@ -56,6 +57,7 @@ class DexDexDetector(Detector):
 
                 gross = self._gross_spread_pct(buy_p, sell_p)
                 if gross <= 0:
+                    self.counters.rejected_by_spread += 1
                     continue
 
                 # Cross-network DEX-DEX → cross-chain type (§7.3 business rule).

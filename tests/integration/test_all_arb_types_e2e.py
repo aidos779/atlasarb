@@ -218,3 +218,40 @@ async def test_funding_signal_end_to_end():
     published = [s for _, s in queue.msgs if s.arb_type.value == "FUNDING"]
     assert published, f"no FUNDING signal; msgs={[s.arb_type.value for _, s in queue.msgs]}"
     assert published[0].net_profit_usd > 0
+
+
+async def test_detector_stats_track_the_real_pipeline():
+    """The §17 per-detector counters are fed by the production path, not by test hooks.
+
+    Guards the wiring end-to-end: detectors increment their own `checked`, the engine
+    attributes the candidate and the publish back to the right arb type, and the whole
+    report zeroes on the interval boundary.
+    """
+    cfg = _permissive_cfg()
+    adapters = {"binance": FakeCex("binance"),
+                "uniswap_ethereum": FakeDex("uniswap_ethereum", network="ethereum")}
+    cache = MarketStateCache(cfg)
+    health = HealthRegistry(cfg)
+    _online(health, *adapters)
+    queue = Queue()
+    engine = ScanningEngine(cfg, adapters, queue, History(), Gas(), {"ETH"},
+                            cache=cache, health=health)
+    _cex_state(cache, "binance", "ETH", "USDT", 2999, 3000)
+    sym = CanonicalSymbol("ETH", "USDT", VenueType.DEX, "ethereum")
+    cache.track("uniswap_ethereum", sym)
+    for _ in range(3):
+        cache.upsert_book(_dex_book("uniswap_ethereum", "ethereum", "ETH", "USDT",
+                                    10000, 31_200_000, "0xpoolA"))
+
+    await engine._process_symbol("ETH", "USDT")
+    report = engine.detector_stats.report_and_reset()
+
+    # Every detector ran on this symbol, so all five report a check.
+    assert all(report[key]["checked"] == 1 for key in report), report
+    assert report["cex_dex"]["candidates"] >= 1
+    assert report["cex_dex"]["published"] == 1
+    # The completed interval stays readable by /stats until the next one lands.
+    assert engine.detector_stats.last_report["cex_dex"]["published"] == 1
+    # The interval boundary clears everything for the next minute.
+    assert all(sum(c.values()) == 0 for c in engine.detector_stats.report_and_reset().values())
+    assert all(sum(c.values()) == 0 for c in engine.detector_stats.last_report.values())

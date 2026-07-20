@@ -26,6 +26,7 @@ class FundingDetector(Detector):
     arb_type = ArbitrageType.FUNDING.value
 
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:
+        self.counters.opportunities_checked += 1
         rates = [
             f for f in ctx.cache.all_funding_for(base_asset)
             if ctx.health.is_online(f.venue)
@@ -45,6 +46,7 @@ class FundingDetector(Detector):
 
         annualized_spread = high.annualized() - low.annualized()
         if annualized_spread < ctx.funding_min_annualized_spread:
+            self.counters.rejected_by_spread += 1
             return []
 
         # Reference "price" for legs = current funding rate (informational).

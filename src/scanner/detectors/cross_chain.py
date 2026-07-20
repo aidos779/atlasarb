@@ -18,9 +18,11 @@ class CrossChainDetector(Detector):
     arb_type = ArbitrageType.CROSS_CHAIN.value
 
     def __init__(self, bridges: BridgeRegistry) -> None:
+        super().__init__()
         self._bridges = bridges
 
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:
+        self.counters.opportunities_checked += 1
         if base_asset not in ctx.verified_tokens:
             return []
         pair = f"{base_asset}/{quote_asset}"
@@ -50,10 +52,13 @@ class CrossChainDetector(Detector):
                     continue  # same chain handled by DEX-DEX detector
                 gross = self._gross_spread_pct(bp, sp)
                 if gross <= 0:
+                    self.counters.rejected_by_spread += 1
                     continue
                 route = self._bridges.route(bn, sn, base_asset)
                 if route is None:
-                    continue  # §7.5 — never emit if no bridge route exists
+                    # No bridge = unexecutable, same class as a validator drop (§7.5).
+                    self.counters.rejected_by_validation += 1
+                    continue
                 candidates.append(Candidate(
                     arb_type=ArbitrageType.CROSS_CHAIN, base_asset=base_asset,
                     quote_asset=quote_asset,

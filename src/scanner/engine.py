@@ -34,6 +34,7 @@ from src.scanner.detectors.dex_dex import DexDexDetector
 from src.scanner.detectors.funding import FundingDetector
 from src.scanner.lifecycle.cooldown import CooldownStore
 from src.scanner.lifecycle.manager import LifecycleManager
+from src.scanner.monitoring.detector_stats import DetectorStats
 from src.scanner.monitoring.metrics import Metrics
 from src.scanner.priority.scheduler import PriorityClassifier, PriorityEventQueue
 from src.scanner.reconciliation.scheduler import ReconciliationScheduler
@@ -102,6 +103,10 @@ class ScanningEngine:
             CexCexDetector(), CexDexDetector(), DexDexDetector(),
             CrossChainDetector(self._bridges), FundingDetector(),
         ]
+        # Per-detector diagnostics (§17). Reads the counters the detectors own; the
+        # engine only attributes post-detection outcomes (candidates, assembler
+        # rejections, publishes) back to the candidate's arb type.
+        self._detector_stats = DetectorStats(self._detectors)
 
         self._market_collector = MarketCollector(
             config, self._cache, adapters, self._priority,
@@ -136,6 +141,11 @@ class ScanningEngine:
     @property
     def health(self) -> HealthRegistry:
         return self._health
+
+    @property
+    def detector_stats(self) -> DetectorStats:
+        """Per-detector funnel counters (§17) — backs the admin /stats command."""
+        return self._detector_stats
 
     def active_signals(self):
         return self._lifecycle.active_signals()
@@ -219,6 +229,7 @@ class ScanningEngine:
             candidates = list(best.values())
         for cand in candidates:
             self._metrics.record_candidate()
+            self._detector_stats.record_candidate(cand.arb_type.value)
             log.debug("candidate_created", arb_type=cand.arb_type.value,
                       coin=base, buy=cand.buy_leg.venue, sell=cand.sell_leg.venue,
                       gross_pct=float(round(cand.gross_spread_pct, 4)))
@@ -231,6 +242,8 @@ class ScanningEngine:
         self._metrics.record_pair_candidate(cand.buy_leg.venue, cand.sell_leg.venue)
         if result.reject_reason is not None:
             self._metrics.record_reject(result.reject_reason.value)
+            self._detector_stats.record_rejection(cand.arb_type.value,
+                                                  result.reject_reason.value)
             self._metrics.record_pair_reject(cand.buy_leg.venue, cand.sell_leg.venue,
                                              result.reject_reason.value)
             # Spread closed on an active signal -> immediate expiry (§12.4).
@@ -241,6 +254,7 @@ class ScanningEngine:
         published, event = await self._lifecycle.admit(signal)
         if published:
             self._metrics.record_signal(event, signal.arb_type.value)
+            self._detector_stats.record_published(signal.arb_type.value)
             self._metrics.record_pair_signal(cand.buy_leg.venue, cand.sell_leg.venue)
 
     def _detection_context(self) -> DetectionContext:
@@ -416,6 +430,8 @@ class ScanningEngine:
     async def _stats_loop(self) -> None:
         """Periodic observability (§17) tuned for readable logs:
 
+        - every 1 min: ``detector_stats`` per-detector funnel for the last minute
+          (counters reset after each emission);
         - every 3 min: compact ``engine_status`` health summary (venues online,
           RPC providers healthy, signals/min, errors/min);
         - every 5 min: full ``engine_stats`` pipeline funnel;
@@ -434,6 +450,10 @@ class ScanningEngine:
             m = self._metrics
             # Every minute: escalate a sustained whole-network RPC outage for alerting.
             self._check_rpc_network_outages()
+            # Every minute: per-detector funnel for the last 60s, then reset. This is the
+            # "is every detector alive?" report — a detector stuck at checked=0 is wired
+            # up but starved, which no aggregate counter can show.
+            log.info("detector_stats", **self._detector_stats.report_and_reset())
             if tick % 3 == 0:
                 log.info("engine_status",
                          **self._engine_status_summary(3.0, prev_rates))

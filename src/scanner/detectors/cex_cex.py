@@ -24,6 +24,7 @@ class CexCexDetector(Detector):
     arb_type = ArbitrageType.CEX_CEX.value
 
     def detect(self, ctx: DetectionContext, base_asset: str, quote_asset: str) -> list[Candidate]:
+        self.counters.opportunities_checked += 1
         pair = f"{base_asset}/{quote_asset}"
         # Identity-level guard: a ticker known to map to DIFFERENT tokens across venues is
         # never a real CEX↔CEX arb. Skip it silently up front so it never reaches — and
@@ -51,6 +52,7 @@ class CexCexDetector(Detector):
 
         gross = self._gross_spread_pct(best_ask, best_bid)
         if gross <= 0:
+            self.counters.rejected_by_spread += 1
             return []
 
         # Ticker-collision / bad-tick guard: a double-digit CEX↔CEX spot spread on the
@@ -59,6 +61,7 @@ class CexCexDetector(Detector):
         # so a phantom "TOP" signal never reaches users.
         ceiling = ctx.max_plausible_cex_spread_pct
         if ceiling > 0 and gross > ceiling:
+            self.counters.rejected_by_spread += 1
             emit, suppressed = _implausible_log_throttle.allow((pair, best_buy_venue,
                                                                 best_sell_venue))
             if emit:

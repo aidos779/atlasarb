@@ -15,6 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
+from src.bot.formatters.stats import format_detector_stats
 from src.bot.handlers.subscription import show_subscription_screen
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import admin_menu
@@ -449,3 +450,18 @@ async def cmd_payments(message: Message, ctx: BotContext, profile: UserProfile,
             state=purchase_status_label(purchase.status, lang),
             provider=purchase.provider or "-"))
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, ctx: BotContext, profile: UserProfile) -> None:
+    """Per-detector funnel for the last completed minute (§17 diagnostics).
+
+    Admin-only and, like every other admin command, indistinguishable from an unknown
+    command for everyone else (BR-ADMIN-1). Reads the same report the ``detector_stats``
+    log line emits, so the screen and the logs always agree.
+    """
+    lang = profile.settings.language.value
+    if not _is_admin(profile):
+        await message.answer(t("error.unknown_command", lang))
+        return
+    await message.answer(format_detector_stats(ctx.engine.detector_stats.last_report))
