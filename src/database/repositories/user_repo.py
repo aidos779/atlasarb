@@ -19,7 +19,6 @@ from src.domain.enums import (
     ArbitrageType,
     Currency,
     Language,
-    SubscriptionStatus,
     SubscriptionTier,
     UserRole,
 )
@@ -49,6 +48,22 @@ def _language_or_default(stored: str) -> Language:
         log.warning("unknown_language_coerced", stored=stored,
                     fallback=_DEFAULT_LANGUAGE.value)
         return _DEFAULT_LANGUAGE
+
+
+def _tier_or_free(stored: str) -> SubscriptionTier:
+    """Coerce a stored tier, tolerating the retired monthly plans.
+
+    Migration 0003 repoints 'basic'/'pro' rows at 'pro_lifetime', but a replica that has
+    not run it yet would otherwise raise ValueError here — failing *every* request from
+    that user. Degrading to Free keeps them served (and paywalled) while the log records
+    the stale value; re-running the migration restores their Pro access.
+    """
+    try:
+        return SubscriptionTier(stored)
+    except ValueError:
+        log.warning("unknown_tier_coerced", stored=stored,
+                    fallback=SubscriptionTier.FREE.value)
+        return SubscriptionTier.FREE
 
 
 class UserRepository:
@@ -140,12 +155,9 @@ class UserRepository:
         row.user_filter.scan_all_assets = f.scan_all_assets
         sub = profile.subscription
         row.subscription.tier = sub.tier.value
-        row.subscription.status = sub.status.value
-        row.subscription.auto_renew = sub.auto_renew
-        row.subscription.retries_used = sub.retries_used
-        row.subscription.period_end = (
-            datetime.fromtimestamp(sub.period_end, tz=UTC)
-            if sub.period_end else None
+        row.subscription.purchased_at = (
+            datetime.fromtimestamp(sub.purchased_at, tz=UTC)
+            if sub.purchased_at else None
         )
 
     async def set_role(self, user_id: int, role: UserRole) -> None:
@@ -159,11 +171,6 @@ class UserRepository:
             selectinload(User.user_filter))
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return self._to_domain(row) if row else None
-
-    async def increment_signals_viewed(self, user_id: int) -> None:
-        row = await self._load(user_id)
-        if row:
-            row.signals_viewed_month += 1
 
     async def alert_candidates(self) -> list[UserProfile]:
         """Onboarded, non-suspended users eligible to receive instant alerts.
@@ -194,16 +201,6 @@ class UserRepository:
                             role=getattr(r, "role", None), error=str(exc))
         return out
 
-    async def due_renewals(self, before_ts: float) -> list[int]:
-        from datetime import datetime
-        cutoff = datetime.fromtimestamp(before_ts, tz=UTC)
-        stmt = select(SubRow.user_id).where(
-            SubRow.tier != SubscriptionTier.FREE.value,
-            SubRow.period_end.is_not(None),
-            SubRow.period_end <= cutoff,
-        )
-        return [uid for uid in (await self._session.execute(stmt)).scalars()]
-
     async def daily_summary_users(self) -> list[UserProfile]:
         stmt = (
             select(User)
@@ -225,10 +222,8 @@ class UserRepository:
         st = row.settings or UserSettingsRow()
         fl = row.user_filter or UserFilterRow()
         subscription = Subscription(
-            tier=SubscriptionTier(sub.tier),
-            status=SubscriptionStatus(sub.status),
-            period_end=sub.period_end.timestamp() if sub.period_end else None,
-            auto_renew=sub.auto_renew, retries_used=sub.retries_used,
+            tier=_tier_or_free(sub.tier),
+            purchased_at=sub.purchased_at.timestamp() if sub.purchased_at else None,
         )
         settings = UserSettings(
             language=_language_or_default(st.language), timezone=st.timezone,

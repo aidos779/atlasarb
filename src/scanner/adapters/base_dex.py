@@ -140,6 +140,14 @@ class BaseDexAdapter(ExchangeAdapter):
         return self._status
 
     def taker_fee(self, symbol: CanonicalSymbol) -> Decimal:
+        """Flat per-venue fallback rate. NOT used by the spot profit pipeline.
+
+        A DEX leg's fee is taken inside the pool and is already priced into
+        DexPoolLeg.fill_price via book.pool_fee_tier, so the assembler charges DEX legs
+        0 on top (see assembler._charges_flat_taker_fee). This stays only to satisfy the
+        ExchangeAdapter port and to serve non-profit callers; it is a generic default
+        that does not track a V3 pool's real tier, so it must not re-enter fee maths.
+        """
         return self._taker_fee
 
     def withdrawal_fee_usd(self, base_asset: str, network: str | None) -> Decimal | None:

@@ -21,14 +21,16 @@ from src.database.base import Database
 from src.database.repositories.favorites_repo import FavoritesRepository
 from src.database.repositories.misc_repos import NotificationRepository
 from src.database.repositories.user_repo import UserRepository
-from src.domain.entitlements import UNLIMITED, entitlements_for
+from src.domain.entitlements import UNLIMITED, distinct_signal_delays, entitlements_for
 from src.domain.signal import Signal
 from src.domain.user import UserProfile
 from src.i18n import t
 from src.services.engine_bridge import EngineBridge
+from src.services.signal_access_service import CHANNEL_ALERT, SignalAccessService
 
 log = get_logger("services.notification")
 
+_PAYWALL_NOTICE = "paywall_notice"
 _COOLDOWN_SEC = 60
 _PROFIT_OVERRIDE_PP = Decimal("0.5")  # §18.3 ±0.5 percentage points
 
@@ -52,10 +54,11 @@ class Notifier(Protocol):
 
 class NotificationService:
     def __init__(self, database: Database, bridge: EngineBridge, config_provider,
-                 on_sent=None) -> None:
+                 on_sent=None, signal_access: SignalAccessService | None = None) -> None:
         self._db = database
         self._bridge = bridge
         self._config_provider = config_provider   # () -> ScannerConfig (confidence threshold)
+        self._signal_access = signal_access
         self._notifier: Notifier | None = None
         self._on_sent = on_sent or (lambda: None)  # telemetry hook (ENGINE STATS)
         self._tasks: list[asyncio.Task] = []
@@ -108,8 +111,9 @@ class NotificationService:
                           error=describe_exc(exc), exc_info=exc)
 
     async def _dispatch(self, signal: Signal) -> None:
-        # Schedule a per-tier delayed pass (§13.3). Pro=0s, Basic=10s, Free=60s.
-        for delay in (0, 10, 60):
+        # One delivery pass per distinct tier delay, taken from the entitlement matrix.
+        # Under the two-plan model every user is real-time, so this is a single pass.
+        for delay in distinct_signal_delays():
             task = asyncio.create_task(self._delayed_pass(signal, delay))
             # Keep a reference and retrieve exceptions so a failing pass is logged
             # rather than surfacing as an unretrieved-task warning (which hid the
@@ -256,10 +260,23 @@ class NotificationService:
         if capped:
             return False
 
+        # Free quota gate — the last check before the send, so a user whose 5 signals
+        # are spent is never pushed a 6th.
+        if self._signal_access is not None and not await self._signal_access.may_deliver(
+                profile):
+            log.info("alert_dropped_quota", user_id=uid, signal_id=signal.id)
+            return False
+
         # ── Telegram round-trip, holding no DB connection ──
         ok = await self._notifier.send_alert(uid, signal, settings.language.value)
         if not ok:
             return False
+
+        # Delivery is confirmed — only now does it cost the user a free slot. A send that
+        # returned False above skipped this, so a failed notification is never charged.
+        if self._signal_access is not None:
+            await self._signal_access.record_delivery(profile, signal.id, CHANNEL_ALERT)
+            await self._maybe_notify_paywall(profile)
 
         self._on_sent()
         log.info("message_delivered", user_id=uid,
@@ -270,6 +287,7 @@ class NotificationService:
                  signal_id=signal.id)
 
         # ── Phase 2 (write transaction): record delivery + arm the cooldown ──
+        # (see _maybe_notify_paywall above for the quota notice)
         # set_cooldown is an atomic UPSERT on (user_id, dedup_key), so two passes racing
         # on the same signal reconcile instead of raising UniqueViolationError.
         async with self._db.session() as session:
@@ -280,3 +298,24 @@ class NotificationService:
             await notif_repo.set_cooldown(uid, dedup,
                                           float(signal.net_profit_pct), until)
         return True
+
+    async def _maybe_notify_paywall(self, profile: UserProfile) -> None:
+        """Announce the paywall once, on the alert that spends the last free signal.
+
+        Guarded by a logged marker rather than by "did we just cross the line", so a
+        crash between the send and the log cannot produce a second announcement, and a
+        user who never opens the bot again still got told why the signals stopped.
+        """
+        if self._signal_access is None or self._notifier is None:
+            return
+        allowance = await self._signal_access.allowance(profile)
+        if not allowance.exhausted:
+            return
+        uid = profile.telegram_user_id
+        async with self._db.session() as session:
+            notif_repo = NotificationRepository(session)
+            if await notif_repo.has_logged(uid, _PAYWALL_NOTICE):
+                return
+            await notif_repo.log(uid, _PAYWALL_NOTICE, "Free signal quota reached")
+        await self._notifier.send_text(uid, self._signal_access.paywall_text(profile))
+        log.info("paywall_notice_sent", user_id=uid)

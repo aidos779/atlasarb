@@ -41,7 +41,6 @@ class User(Base):
     suspended: Mapped[bool] = mapped_column(Boolean, default=False)
     pending_deeplink: Mapped[str | None] = mapped_column(String(128))
     ref_code: Mapped[str | None] = mapped_column(String(64))
-    signals_viewed_month: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     subscription: Mapped[Subscription] = relationship(
@@ -55,15 +54,16 @@ class User(Base):
 
 
 class Subscription(Base):
+    """Pro is a one-time lifetime purchase, so the row carries no expiry, auto-renew
+    flag or retry counter — those columns were dropped by 0003_two_plan_lifetime.
+    """
+
     __tablename__ = "subscriptions"
 
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True)
     tier: Mapped[str] = mapped_column(String(16), default="free", index=True)
-    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
-    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    auto_renew: Mapped[bool] = mapped_column(Boolean, default=True)
-    retries_used: Mapped[int] = mapped_column(Integer, default=0)
+    purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -173,15 +173,76 @@ class SignalInteraction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-class SubscriptionEvent(Base):
-    __tablename__ = "subscription_events"
-    __table_args__ = (Index("ix_sub_event_user", "user_id", "created_at"),)
+class SignalDelivery(Base):
+    """Ledger of arbitrage signals actually delivered to a user — the Free quota counter.
+
+    One row per (user, signal) is written *after* a confirmed delivery, never before.
+    The unique constraint is what makes the quota exact rather than approximate: a
+    re-render of the signal list, a retry, or the same opportunity arriving twice
+    reconciles into the existing row instead of burning another free slot.
+    """
+
+    __tablename__ = "signal_deliveries"
+    __table_args__ = (
+        UniqueConstraint("user_id", "signal_id", name="uq_signal_delivery"),
+        Index("ix_signal_delivery_user", "user_id", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    event_type: Mapped[str] = mapped_column(String(32))   # purchase|renewal|failure|refund|cancel
+    signal_id: Mapped[str] = mapped_column(String(36))
+    channel: Mapped[str] = mapped_column(String(16))      # list | alert
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class Purchase(Base):
+    """One attempt to buy one product, and the state machine it is in.
+
+    ``external_payment_id`` is unique when set: it is the provider's own reference, and
+    the uniqueness is what lets a replayed webhook resolve to the purchase it already
+    settled instead of creating a second one.
+    """
+
+    __tablename__ = "purchases"
+    __table_args__ = (
+        UniqueConstraint("external_payment_id", name="uq_purchase_external_id"),
+        Index("ix_purchase_user_created", "user_id", "created_at"),
+        Index("ix_purchase_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    product_code: Mapped[str] = mapped_column(String(32))
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
+    status: Mapped[str] = mapped_column(String(16), default="created")
+    provider: Mapped[str] = mapped_column(String(32), default="")
+    external_payment_id: Mapped[str | None] = mapped_column(String(128))
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SubscriptionEvent(Base):
+    __tablename__ = "subscription_events"
+    __table_args__ = (
+        Index("ix_sub_event_user", "user_id", "created_at"),
+        # Idempotency key for payment webhooks: providers deliver at-least-once, so the
+        # same confirmed payment can arrive twice. The unique index makes the second
+        # insert fail rather than granting (and billing) a second time. NULL for events
+        # with no external payment behind them (admin comps).
+        UniqueConstraint("external_payment_id", name="uq_sub_event_payment"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    event_type: Mapped[str] = mapped_column(String(32))   # purchase|refund|comp
     tier: Mapped[str] = mapped_column(String(16))
     amount_usd: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
+    #: Provider-scoped payment reference, e.g. "cryptobot:12345" / "nowpayments:abc".
+    external_payment_id: Mapped[str | None] = mapped_column(String(128))
     detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

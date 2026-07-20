@@ -109,7 +109,7 @@ def test_profile_keyboards_are_localized(lang):
     ent = entitlements_for(profile.effective_tier)
     for name, markup in [
         ("settings_menu", settings_menu(profile, lang)),
-        ("subscription_menu", subscription_menu(profile, lang)),
+        ("subscription_menu", subscription_menu(profile, lang, 20.0)),
         ("filters_panel", filters_panel(profile, ent, lang)),
         ("notifications_menu", notifications_menu(profile, ent, lang)),
     ]:

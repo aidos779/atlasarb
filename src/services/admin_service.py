@@ -6,6 +6,7 @@ Every mutating action writes an immutable audit entry with a mandatory reason
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from src.config import get_logger
@@ -70,16 +71,28 @@ class AdminService:
                 return False
             before = {"tier": profile.subscription.tier.value}
             profile.subscription.tier = tier
-            from src.domain.enums import SubscriptionStatus
-            profile.subscription.status = SubscriptionStatus.ACTIVE
+            if tier == SubscriptionTier.PRO_LIFETIME and not profile.subscription.purchased_at:
+                profile.subscription.purchased_at = time.time()
             if profile.role not in (UserRole.ADMIN, UserRole.SUPPORT):
                 profile.role = UserRole.PAID if tier != SubscriptionTier.FREE else UserRole.FREE
             await repo.save_profile(profile)
             await AuditRepository(session).record(
                 admin_id, "tier_override", user_id, reason, before, {"tier": tier.value})
-            await BillingRepository(session).record(user_id, "refund" if False else "comp",
-                                                    tier.value)
+            # Comped, not bought: no external_payment_id and no revenue attached, so an
+            # admin grant can never be mistaken for a paid conversion.
+            await BillingRepository(session).record(user_id, "comp", tier.value)
             return True
+
+    async def grant_pro(self, admin_id: int, user_id: int, reason: str) -> bool:
+        """Comp Pro Lifetime. Intent-revealing alias over the audited tier override —
+        the grant path itself is not duplicated."""
+        return await self.override_tier(
+            admin_id, user_id, SubscriptionTier.PRO_LIFETIME, reason)
+
+    async def revoke_pro(self, admin_id: int, user_id: int, reason: str) -> bool:
+        """Return a user to Free. Their delivered-signal ledger is untouched, so a
+        previously exhausted Free user stays exhausted rather than getting a fresh 5."""
+        return await self.override_tier(admin_id, user_id, SubscriptionTier.FREE, reason)
 
     async def reset_filters(self, admin_id: int, user_id: int, reason: str) -> bool:
         async with self._db.session() as session:
@@ -176,6 +189,6 @@ class AdminService:
                 admin_id, "support_reply", ticket.user_id, body[:200], {}, {})
             return ticket.user_id
 
-    async def mrr(self) -> float:
+    async def revenue_usd(self) -> float:
         async with self._db.session() as session:
-            return await BillingRepository(session).mrr()
+            return await BillingRepository(session).revenue_usd()

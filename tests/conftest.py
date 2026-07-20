@@ -6,6 +6,7 @@ import pytest
 from src.config.scanner_config import ConfigManager, ScannerConfig
 from src.config.settings import Settings
 from src.database.base import Database
+from src.services.product_catalog import ProductCatalog
 
 
 @pytest.fixture
@@ -22,8 +23,13 @@ def config_manager() -> ConfigManager:
 def settings() -> Settings:
     return Settings(
         bot_token="123:TEST", database_url="sqlite+aiosqlite:///:memory:",
-        environment="development", admin_user_ids=[999], support_user_ids=[888],
+        environment="development", admin_telegram_ids=[999], support_user_ids=[888],
     )
+
+
+@pytest.fixture
+def catalog(settings: Settings) -> ProductCatalog:
+    return ProductCatalog(settings)
 
 
 @pytest.fixture

@@ -12,7 +12,6 @@ from src.domain.enums import (
     ArbitrageType,
     Currency,
     Language,
-    SubscriptionStatus,
     SubscriptionTier,
     UserRole,
 )
@@ -72,16 +71,17 @@ class UserSettings:
 
 @dataclass
 class Subscription:
+    """Pro is a one-time purchase that never expires, so there is nothing to expire,
+    renew or prorate — the tier is the whole state. ``purchased_at`` is kept for
+    support/audit ("when did this user buy?"), never for access decisions.
+    """
+
     tier: SubscriptionTier = SubscriptionTier.FREE
-    status: SubscriptionStatus = SubscriptionStatus.ACTIVE
-    period_end: float | None = None            # epoch sec
-    auto_renew: bool = True
-    retries_used: int = 0
+    purchased_at: float | None = None          # epoch sec
 
     @property
-    def is_paid_active(self) -> bool:
-        """R-ROLE-3 derived Paid state."""
-        return self.tier != SubscriptionTier.FREE and self.status == SubscriptionStatus.ACTIVE
+    def is_pro(self) -> bool:
+        return self.tier == SubscriptionTier.PRO_LIFETIME
 
 
 @dataclass
@@ -102,14 +102,18 @@ class UserProfile:
 
     @property
     def effective_tier(self) -> SubscriptionTier:
-        # Dev-build override: unlock full PRO for everyone (see domain/dev_mode).
+        # Dev-build override: unlock Pro for everyone (see domain/dev_mode).
         # Production never enables this, so real tier logic is untouched.
         from src.domain.dev_mode import unlimited_access_enabled
         if unlimited_access_enabled():
-            return SubscriptionTier.PRO
-        if self.subscription.is_paid_active:
-            return self.subscription.tier
-        return SubscriptionTier.FREE
+            return SubscriptionTier.PRO_LIFETIME
+        # Staff (Administrator/Support) always resolve to Pro. The membership itself
+        # comes from the ADMIN_TELEGRAM_IDS / SUPPORT_USER_IDS allow-lists via
+        # UserService._allowlist_role (R-ROLE-1) — no Telegram id ever reaches this
+        # module, so the override stays configuration, not business logic.
+        if self.is_staff():
+            return SubscriptionTier.PRO_LIFETIME
+        return self.subscription.tier
 
     @property
     def onboarding_complete(self) -> bool:

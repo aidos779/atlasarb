@@ -1,13 +1,15 @@
-"""Subscription handlers (PRD §15) — plan comparison, upgrade with proration, payment
-(Telegram Payments / crypto invoice), self-service cancel.
+"""Subscription handlers — plan comparison and the Pro Lifetime checkout entry point.
 
-Payment confirmation is modeled here through the confirm step; in production the confirm
-button opens a Telegram invoice and entitlements unlock on the verified payment webhook
-(NFR-SEC-03). The service-level activation is identical either way.
+Pro is a one-time purchase, so there is no upgrade path, no proration and no
+cancellation flow to render: a user is either Free (quota-capped) or Pro (forever).
+Every price shown here comes from the product catalogue, never from a literal.
+
+``sub:buy`` runs the real purchase lifecycle (PurchaseService) and shows whatever the
+configured provider returns. With the placeholder provider no invoice can be issued, so
+the checkout closes as CANCELLED and the user sees "coming soon" — the grant itself only
+ever happens on a verified settlement (see src/services/payments/provider.py).
 """
 from __future__ import annotations
-
-import time
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -16,34 +18,33 @@ from aiogram.types import CallbackQuery, Message
 from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
-from src.bot.keyboards.screens import (
-    checkout_keyboard,
-    plan_comparison,
-    subscription_menu,
-)
-from src.domain.enums import SubscriptionTier
+from src.bot.keyboards.inline import back_home
+from src.bot.keyboards.screens import checkout_keyboard, plan_comparison, subscription_menu
 from src.domain.user import UserProfile
 from src.i18n import t, tier_label, translations_of
 
 router = Router(name="subscription")
 
 
-async def _show_subscription(event, ctx: BotContext, profile: UserProfile,
-                             need_ack: bool = True) -> None:
+async def show_subscription_screen(event, ctx: BotContext, profile: UserProfile,
+                                   need_ack: bool = True) -> None:
     if need_ack and isinstance(event, CallbackQuery):
         await ack(event)
     lang = profile.settings.language.value
-    ent = ctx.subscriptions.entitlements(profile)
+    product = ctx.subscriptions.pro_product()
     lines = [t("subscription.title", lang), "",
              t("subscription.current", lang,
                tier=tier_label(profile.effective_tier, lang))]
-    if profile.subscription.period_end:
-        lines.append(t("subscription.renews", lang, date=format_datetime(
-            profile.subscription.period_end, profile.settings.timezone)))
-    per_refresh = (t("subscription.unlimited", lang) if ent.signals_per_refresh < 0
-                   else ent.signals_per_refresh)
-    lines.append(t("subscription.per_refresh", lang, count=per_refresh))
-    kb = subscription_menu(profile, lang)
+    if profile.subscription.is_pro:
+        lines.append(t("subscription.lifetime_active", lang))
+        if profile.subscription.purchased_at:
+            lines.append(t("subscription.purchased_on", lang, date=format_datetime(
+                profile.subscription.purchased_at, profile.settings.timezone)))
+    else:
+        allowance = await ctx.signal_access.allowance(profile)
+        lines.append(t("subscription.free_usage", lang, used=allowance.delivered,
+                       quota=allowance.quota, remaining=allowance.remaining))
+    kb = subscription_menu(profile, lang, product.amount_float)
     text = "\n".join(lines)
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(text, reply_markup=kb)
@@ -53,17 +54,17 @@ async def _show_subscription(event, ctx: BotContext, profile: UserProfile,
 
 @router.message(Command("subscription"))
 async def cmd_subscription(message: Message, ctx: BotContext, profile: UserProfile) -> None:
-    await _show_subscription(message, ctx, profile)
+    await show_subscription_screen(message, ctx, profile)
 
 
 @router.message(F.text.in_(translations_of("menu.subscription")))
 async def reply_subscription(message: Message, ctx: BotContext, profile: UserProfile) -> None:
-    await _show_subscription(message, ctx, profile)
+    await show_subscription_screen(message, ctx, profile)
 
 
 @router.callback_query(F.data == "menu:subscription")
 async def menu_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
-    await _show_subscription(cb, ctx, profile)
+    await show_subscription_screen(cb, ctx, profile)
 
 
 @router.callback_query(F.data == "sub:compare")
@@ -75,8 +76,8 @@ async def compare_plans(cb: CallbackQuery, ctx: BotContext, profile: UserProfile
     for plan in pricing:
         marker = (t("subscription.current_marker", lang)
                   if plan.tier == profile.effective_tier else "")
-        line = t("subscription.plan_line", lang, tier=tier_label(plan.tier, lang),
-                 price=f"{plan.monthly_usd:g}")
+        key = "subscription.plan_line_once" if plan.one_time else "subscription.plan_line_free"
+        line = t(key, lang, tier=tier_label(plan.tier, lang), price=f"{plan.price_usd:g}")
         lines.append(f"<b>{line}</b>{marker}")
         for feat in plan.features:
             lines.append(f"  • {feat}")
@@ -84,54 +85,33 @@ async def compare_plans(cb: CallbackQuery, ctx: BotContext, profile: UserProfile
     await cb.message.edit_text("\n".join(lines), reply_markup=plan_comparison(pricing, lang))
 
 
-@router.callback_query(F.data.startswith("sub:choose:"))
-async def choose_plan(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
-    await ack(cb)
-    tier = cb.data.split(":")[-1]
-    lang = profile.settings.language.value
-    target = SubscriptionTier(tier)
-    charge = ctx.subscriptions.prorated_charge(profile, target)
-    prorated = (t("subscription.prorated", lang)
-                if profile.subscription.is_paid_active else "")
-    text = "\n".join([
-        t("subscription.selected", lang, tier=tier_label(target, lang)),
-        t("subscription.billing_monthly", lang),
-        t("subscription.amount_due", lang, amount=f"{charge:.2f}") + prorated,
-        "",
-        t("subscription.pay_hint", lang),
-    ])
-    await cb.message.edit_text(text, reply_markup=checkout_keyboard(tier, lang))
+@router.callback_query(F.data == "sub:buy")
+async def buy_pro(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    """Checkout entry point — opens a purchase and asks the provider for an invoice.
 
-
-@router.callback_query(F.data.startswith("sub:confirm:"))
-async def confirm_payment(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    The full lifecycle already runs here: a Purchase row is created (or an abandoned
+    one resumed) and moves to PENDING once an invoice exists. With the placeholder
+    provider no invoice can be issued, so the purchase is closed as CANCELLED and the
+    user sees "coming soon" — nothing is granted, and no payment is faked.
+    """
     await ack(cb)
-    tier = cb.data.split(":")[-1]
     lang = profile.settings.language.value
-    target = SubscriptionTier(tier)
-    charge = ctx.subscriptions.prorated_charge(profile, target)
-    # Payment provider integration point. Here we treat confirm as a verified success;
-    # in production this is driven by the payment webhook (NFR-SEC-03).
-    payment_ok = bool(ctx.settings.telegram_payments_provider_token) or True
-    if not payment_ok:
-        from src.bot.keyboards.screens import retry_payment
-        await cb.message.edit_text(t("subscription.payment_failed", lang),
-                                   reply_markup=retry_payment(tier, lang))
+    if profile.subscription.is_pro:
+        await cb.message.edit_text(t("subscription.already_pro", lang))
         return
-    updated = await ctx.subscriptions.activate(profile.telegram_user_id, target, charge)
+    product = ctx.subscriptions.pro_product()
+    checkout = await ctx.purchases.start_checkout(profile.telegram_user_id, product)
+    if not checkout.available:
+        text = "\n\n".join([
+            t("subscription.checkout_title", lang, price=product.format_amount()),
+            t("subscription.checkout_soon", lang),
+        ])
+        await cb.message.edit_text(text,
+                                   reply_markup=back_home(lang, back="menu:subscription"))
+        return
+    text = "\n\n".join([
+        t("subscription.checkout_title", lang, price=product.format_amount()),
+        t("subscription.checkout_open", lang),
+    ])
     await cb.message.edit_text(
-        t("subscription.upgraded", lang, tier=tier_label(target, lang)))
-    await _show_subscription(cb, ctx, updated, need_ack=False)
-
-
-@router.callback_query(F.data == "sub:cancel")
-async def cancel_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
-    await ack(cb)
-    lang = profile.settings.language.value
-    updated = await ctx.subscriptions.cancel(profile.telegram_user_id)
-    date = (format_datetime(updated.subscription.period_end, profile.settings.timezone)
-            if updated.subscription.period_end
-            else format_datetime(time.time() + 30 * 86400, profile.settings.timezone))
-    await cb.message.edit_text(
-        t("subscription.cancelled", lang,
-          tier=tier_label(updated.subscription.tier, lang), date=date))
+        text, reply_markup=checkout_keyboard(checkout.pay_url or "", lang))

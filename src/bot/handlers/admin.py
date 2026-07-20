@@ -7,19 +7,21 @@ and are audited (R-ADMIN-2). Large broadcasts need a second admin (R-ADMIN-3).
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.callbacks import ack
 from src.bot.context import BotContext
+from src.bot.formatters.money import format_datetime
+from src.bot.handlers.subscription import show_subscription_screen
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import admin_menu
 from src.bot.states.states import AdminStates
 from src.domain.enums import SubscriptionTier, UserRole
 from src.domain.user import UserProfile
-from src.i18n import t, tier_label
+from src.i18n import purchase_status_label, t, tier_label
 
 router = Router(name="admin")
 
@@ -97,12 +99,12 @@ async def analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) ->
         await ack(cb)
         return
     await ack(cb)
-    mrr = await ctx.admin.mrr()
+    revenue = await ctx.admin.revenue_usd()
     metrics = ctx.analytics.engine_metrics()
     lang = profile.settings.language.value
     text = "\n".join([
         t("admin.analytics_title", lang), "",
-        t("admin.mrr", lang, amount=f"{mrr:.2f}"),
+        t("admin.revenue", lang, amount=f"{revenue:.2f}"),
         t("admin.signals_created", lang, count=metrics["signals_created"]),
         t("admin.signals_by_type", lang, breakdown=metrics["signals_by_type"]),
         t("admin.rejections", lang, rejections=metrics["rejections"]),
@@ -252,7 +254,7 @@ async def apply_action(message: Message, ctx: BotContext, profile: UserProfile,
     if action in ("suspend", "reactivate"):
         ok = await ctx.admin.set_suspended(admin_id, target, action == "suspend", reason)
     elif action == "pro":
-        ok = await ctx.admin.override_tier(admin_id, target, SubscriptionTier.PRO, reason)
+        ok = await ctx.admin.override_tier(admin_id, target, SubscriptionTier.PRO_LIFETIME, reason)
     elif action == "resetf":
         ok = await ctx.admin.reset_filters(admin_id, target, reason)
     lang = profile.settings.language.value
@@ -266,10 +268,10 @@ async def subs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None
         return
     await ack(cb)
     lang = profile.settings.language.value
-    mrr = await ctx.admin.mrr()
+    revenue = await ctx.admin.revenue_usd()
     await cb.message.edit_text(
         "\n".join([t("admin.subs_title", lang), "",
-                   t("admin.subs_mrr", lang, amount=f"{mrr:.2f}"),
+                   t("admin.subs_revenue", lang, amount=f"{revenue:.2f}"),
                    t("admin.subs_hint", lang)]),
         reply_markup=back_home(lang, back="admin:menu"))
 
@@ -330,3 +332,120 @@ async def broadcast_confirm(cb: CallbackQuery, ctx: BotContext, profile: UserPro
         except Exception:  # noqa: BLE001
             continue
     await cb.message.edit_text(t("admin.broadcast_sent", lang, count=sent))
+
+
+# ── Subscription management commands (ADMIN only) ──
+#
+# These are Administrator-only, not staff-wide: Support can read tickets, but granting
+# or revoking paid access is an owner action. Non-admins get the same "unknown command"
+# response every other admin surface gives them (BR-ADMIN-1 — reveal nothing).
+
+
+def _is_admin(profile: UserProfile) -> bool:
+    return profile.role == UserRole.ADMIN
+
+
+async def _resolve_target(message: Message, ctx: BotContext, profile: UserProfile,
+                          command: CommandObject, usage: str) -> UserProfile | None:
+    """Parse `<telegram_id>` and load that user, reporting the usual failures."""
+    lang = profile.settings.language.value
+    raw = (command.args or "").strip().split()
+    if not raw:
+        await message.answer(t("admin.cmd_usage", lang, usage=usage))
+        return None
+    target = await ctx.admin.lookup(raw[0])
+    if target is None:
+        await message.answer(t("admin.cmd_no_user", lang, query=raw[0]))
+    return target
+
+
+@router.message(Command("grantpro"))
+async def cmd_grant_pro(message: Message, ctx: BotContext, profile: UserProfile,
+                        command: CommandObject) -> None:
+    lang = profile.settings.language.value
+    if not _is_admin(profile):
+        await message.answer(t("error.unknown_command", lang))
+        return
+    target = await _resolve_target(message, ctx, profile, command, "/grantpro <telegram_id>")
+    if target is None:
+        return
+    ok = await ctx.admin.grant_pro(profile.telegram_user_id, target.telegram_user_id,
+                                   "admin command /grantpro")
+    key = "admin.cmd_granted" if ok else "admin.action_failed"
+    await message.answer(t(key, lang, user=target.telegram_user_id))
+
+
+@router.message(Command("revokepro"))
+async def cmd_revoke_pro(message: Message, ctx: BotContext, profile: UserProfile,
+                         command: CommandObject) -> None:
+    lang = profile.settings.language.value
+    if not _is_admin(profile):
+        await message.answer(t("error.unknown_command", lang))
+        return
+    target = await _resolve_target(message, ctx, profile, command, "/revokepro <telegram_id>")
+    if target is None:
+        return
+    ok = await ctx.admin.revoke_pro(profile.telegram_user_id, target.telegram_user_id,
+                                    "admin command /revokepro")
+    key = "admin.cmd_revoked" if ok else "admin.action_failed"
+    await message.answer(t(key, lang, user=target.telegram_user_id))
+
+
+# Matches only the argument form. `/subscription` with no argument is the user-facing
+# screen and stays with the subscription router; a non-admin who passes an argument
+# falls through to that same screen rather than learning this command exists.
+@router.message(Command("subscription"), F.text.regexp(r"^/subscription(?:@\S+)?\s+\S"))
+async def cmd_admin_subscription(message: Message, ctx: BotContext, profile: UserProfile,
+                                 command: CommandObject) -> None:
+    if not _is_admin(profile):
+        await show_subscription_screen(message, ctx, profile)
+        return
+    lang = profile.settings.language.value
+    target = await _resolve_target(message, ctx, profile, command,
+                                   "/subscription <telegram_id>")
+    if target is None:
+        return
+    allowance = await ctx.signal_access.allowance(target)
+    delivered = t("admin.sub_unlimited", lang) if allowance.unlimited else t(
+        "admin.sub_delivered_of", lang, used=allowance.delivered, quota=allowance.quota)
+    lines = [
+        t("admin.sub_title", lang, user=target.telegram_user_id),
+        t("admin.sub_tier", lang, tier=tier_label(target.effective_tier, lang)),
+        t("admin.sub_delivered", lang, value=delivered),
+    ]
+    if target.subscription.purchased_at:
+        lines.append(t("admin.sub_purchased", lang, date=format_datetime(
+            target.subscription.purchased_at, profile.settings.timezone)))
+    latest = await ctx.purchases.latest(target.telegram_user_id)
+    if latest is None:
+        lines.append(t("admin.sub_no_purchase", lang))
+    else:
+        lines.append(t("admin.sub_last_purchase", lang,
+                       state=purchase_status_label(latest.status, lang),
+                       amount=f"{latest.amount:g}", currency=latest.currency))
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("payments"))
+async def cmd_payments(message: Message, ctx: BotContext, profile: UserProfile,
+                       command: CommandObject) -> None:
+    lang = profile.settings.language.value
+    if not _is_admin(profile):
+        await message.answer(t("error.unknown_command", lang))
+        return
+    target = await _resolve_target(message, ctx, profile, command, "/payments <telegram_id>")
+    if target is None:
+        return
+    history = await ctx.purchases.history(target.telegram_user_id)
+    lines = [t("admin.payments_title", lang, user=target.telegram_user_id)]
+    if not history:
+        lines.append(t("admin.payments_empty", lang))
+    for purchase in history:
+        lines.append(t(
+            "admin.payments_line", lang,
+            date=format_datetime(purchase.created_at or 0.0, profile.settings.timezone),
+            product=purchase.product_code.value,
+            amount=f"{purchase.amount:g}", currency=purchase.currency,
+            state=purchase_status_label(purchase.status, lang),
+            provider=purchase.provider or "-"))
+    await message.answer("\n".join(lines))

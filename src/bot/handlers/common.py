@@ -12,9 +12,11 @@ from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.signal import format_card
 from src.bot.keyboards.inline import main_menu, signal_list_controls
+from src.bot.keyboards.screens import paywall_keyboard
 from src.domain.entitlements import UNLIMITED, entitlements_for
 from src.domain.user import UserFilter, UserProfile
 from src.i18n import t
+from src.services.signal_access_service import CHANNEL_LIST
 
 _SORT_MODES = ["profit", "spread", "liquidity", "risk", "age"]
 _PAGE_SIZE = 5
@@ -93,6 +95,14 @@ async def render_signal_list(event: Message | CallbackQuery, ctx: BotContext,
     if ent.signals_per_refresh != UNLIMITED:
         signals = signals[: ent.signals_per_refresh]
 
+    # Free quota gate. Signals beyond the user's remaining budget are withheld here, so
+    # nothing outside the allowance is ever rendered — and therefore never counted.
+    allowance = await ctx.signal_access.allowance(profile, signals)
+    if allowance.exhausted:
+        await render_paywall(event, ctx, profile, need_ack=need_ack)
+        return
+    signals = allowance.visible
+
     if not signals:
         await _render(event, t("signals.empty", lang), main_menu(lang), need_ack=need_ack)
         return
@@ -111,11 +121,26 @@ async def render_signal_list(event: Message | CallbackQuery, ctx: BotContext,
         cards_meta.append((s, s.id in fav_ids))
 
     header = t("signals.page", lang, current=session.page, total=total_pages)
-    if profile.effective_tier.value == "free":
-        header = t("signals.free_notice", lang) + "\n\n" + header
+    if not allowance.unlimited:
+        header = t("signals.free_quota", lang, remaining=allowance.remaining,
+                   quota=allowance.quota) + "\n\n" + header
     text = header + "\n\n" + "\n\n".join(cards_text)
     kb = signal_list_controls(lang, session.sort, session.page, total_pages, cards_meta)
     await _render(event, text, kb, need_ack=need_ack)
+    # Charge the quota only now — _render has returned, so these cards are on the user's
+    # screen. A raised send/edit above skips this entirely and costs the user nothing.
+    await ctx.signal_access.record_deliveries(
+        profile, [s.id for s in page_signals], CHANNEL_LIST)
+
+
+async def render_paywall(event: Message | CallbackQuery, ctx: BotContext,
+                         profile: UserProfile, need_ack: bool = True) -> None:
+    """Free quota spent — pitch Pro Lifetime. Navigation stays fully available."""
+    # Copy is composed by SignalAccessService so the pull and push surfaces cannot
+    # drift into two different offers, and the price comes from the product catalogue.
+    text = ctx.signal_access.paywall_text(profile)
+    await _render(event, text, paywall_keyboard(profile.settings.language.value),
+                  need_ack=need_ack)
 
 
 async def _render(event: Message | CallbackQuery, text: str, kb,

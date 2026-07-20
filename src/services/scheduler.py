@@ -1,13 +1,14 @@
-"""Background scheduler — Daily Summary delivery, subscription expiry/renewal reminders,
-mute purge (PRD §13.4, §15.4/§15.5, §13.5).
+"""Background scheduler — Daily Summary delivery and mute purge (PRD §13.4, §13.5).
 
 Runs a 60-second tick. Daily Summary fires at each user's configured local time
-(FR-NOTIF-02, timezone-aware). Lapsed paid periods downgrade to Free (R-SUB-2).
+(FR-NOTIF-02, timezone-aware).
+
+There is no subscription expiry pass: Pro is a one-time lifetime purchase, so no
+account can lapse and nothing needs sweeping.
 """
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -60,7 +61,6 @@ class BackgroundScheduler:
     async def _tick(self) -> None:
         await self._purge_mutes()
         await self._daily_summaries()
-        await self._expire_subscriptions()
 
     async def _purge_mutes(self) -> None:
         async with self._db.session() as session:
@@ -100,23 +100,3 @@ class BackgroundScheduler:
             lines.append(t("summary.empty", lang))
         await self._notifier.send_text(profile.telegram_user_id, "\n".join(lines))
 
-    async def _expire_subscriptions(self) -> None:
-        now = time.time()
-        async with self._db.session() as session:
-            due = await UserRepository(session).due_renewals(now)
-        for user_id in due:
-            # Provider auto-charge is out-of-process (webhook). Here we model the
-            # end-of-period state transition: cancelled/past-due → downgrade (R-SUB-2).
-            profile = await self._subscriptions_get(user_id)
-            if profile is None:
-                continue
-            if not profile.subscription.auto_renew:
-                await self._subscriptions.process_renewal(user_id, charge_succeeds=False)
-                if self._notifier:
-                    await self._notifier.send_text(
-                        user_id, t("subscription.ended",
-                                   profile.settings.language.value))
-
-    async def _subscriptions_get(self, user_id: int):
-        async with self._db.session() as session:
-            return await UserRepository(session).get(user_id)

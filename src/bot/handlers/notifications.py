@@ -12,7 +12,7 @@ from src.bot.keyboards.screens import notifications_menu
 from src.database.repositories.misc_repos import NotificationRepository
 from src.domain.entitlements import entitlements_for
 from src.domain.user import UserProfile
-from src.i18n import t, tier_label
+from src.i18n import t
 
 router = Router(name="notifications")
 
@@ -37,14 +37,7 @@ async def menu_notifications(cb: CallbackQuery, profile: UserProfile) -> None:
 @router.callback_query(F.data.startswith("notif:toggle:"))
 async def toggle(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     which = cb.data.split(":")[-1]
-    ent = entitlements_for(profile.effective_tier)
-    lang = profile.settings.language.value
     s = profile.settings
-    if which in ("fav_coin", "fav_exchange") and not ent.favorite_entity_alerts:
-        await ack(cb, t("filters.upsell", lang,
-                        filter=t("filters.favorite_alerts", lang),
-                        tier=tier_label("basic", lang)), show_alert=True)
-        return
     await ack(cb)
     if which == "instant":
         s.instant_alerts_enabled = not s.instant_alerts_enabled

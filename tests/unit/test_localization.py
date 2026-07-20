@@ -37,8 +37,9 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 _ALLOWED_LATIN = {
     "crypto", "arbitrage", "scanner", "telegram", "payments", "binance", "okx",
     "bitget", "mexc", "uniswap", "pancakeswap", "jupiter", "sushiswap",
-    "usdt", "btc", "eth", "sol", "bnb", "cex", "dex", "mrr", "api", "id", "p95",
-    "free", "basic", "pro", "ms", "faq",
+    "usdt", "btc", "eth", "sol", "bnb", "cex", "dex", "api", "id", "p95",
+    # Product and plan names: "AtlasArb Pro Lifetime" is a brand, not copy to translate.
+    "atlasarb", "free", "pro", "lifetime", "ms", "faq",
     # bot commands and placeholder names, which are identifiers rather than prose
     "start", "menu", "signals", "favorites", "profile", "subscription", "settings",
     "search", "history", "help", "cancel",

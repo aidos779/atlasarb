@@ -26,14 +26,23 @@ class BillingRepository:
         self._session = session
 
     async def record(self, user_id: int, event_type: str, tier: str,
-                     amount_usd: float = 0.0, detail: str | None = None) -> None:
+                     amount_usd: float = 0.0, detail: str | None = None,
+                     external_payment_id: str | None = None) -> None:
         self._session.add(SubscriptionEvent(
             user_id=user_id, event_type=event_type, tier=tier,
-            amount_usd=amount_usd, detail=detail))
+            amount_usd=amount_usd, detail=detail,
+            external_payment_id=external_payment_id))
 
-    async def mrr(self) -> float:
+    async def payment_recorded(self, external_payment_id: str) -> bool:
+        """Has this provider payment already been granted? (webhook idempotency)."""
+        stmt = select(SubscriptionEvent.id).where(
+            SubscriptionEvent.external_payment_id == external_payment_id)
+        return (await self._session.execute(stmt)).first() is not None
+
+    async def revenue_usd(self) -> float:
+        """Lifetime revenue. Not MRR — the product has no recurring component."""
         stmt = select(func.coalesce(func.sum(SubscriptionEvent.amount_usd), 0)).where(
-            SubscriptionEvent.event_type.in_(("purchase", "renewal")))
+            SubscriptionEvent.event_type == "purchase")
         return float((await self._session.execute(stmt)).scalar_one())
 
 
@@ -121,6 +130,13 @@ class NotificationRepository:
             NotificationLog.user_id == user_id
         ).order_by(NotificationLog.created_at.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+    async def has_logged(self, user_id: int, notif_type: str) -> bool:
+        """Has this one-shot notification ever been sent to this user?"""
+        stmt = select(NotificationLog.id).where(
+            NotificationLog.user_id == user_id,
+            NotificationLog.notif_type == notif_type).limit(1)
+        return (await self._session.execute(stmt)).first() is not None
 
     async def alerts_in_last_hour(self, user_id: int, since: datetime) -> int:
         stmt = select(func.count()).select_from(NotificationLog).where(

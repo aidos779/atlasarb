@@ -24,9 +24,13 @@ mapping of every requirement to its implementation.
 - **7 modular exchange adapters** (Binance, OKX, Bitget, MEXC + Uniswap, PancakeSwap,
   Jupiter) behind one shared interface — adding a venue is one new module, zero engine changes.
 - **Complete Telegram bot**: onboarding, Main Menu, Signal List/Details, Search, Filtering,
-  Notifications, Settings, Subscription/billing, Favorites, History, Profile, Support, and a
-  full Admin Panel — with i18n (English/Russian/Kazakh), inline+reply keyboards, FSM state,
-  rate limiting, and tier gating.
+  Notifications, Settings, Subscription, Favorites, History, Profile, Support, and a
+  full Admin Panel — with i18n (English/Russian), inline+reply keyboards, FSM state,
+  rate limiting, and the signal paywall.
+- **Two-plan pricing**: Free delivers 5 arbitrage signals with every feature unlocked;
+  **Pro Lifetime** is a single $20 purchase for unlimited signals, forever. No
+  subscriptions, renewals or expiry. The Free quota is metered by a delivery ledger that
+  is written only after a signal actually reaches the user.
 - **Clean Architecture**: `domain` (pure) → `application/services` → `infrastructure`
   (adapters, DB, telegram). Dependency Inversion throughout; async end-to-end.
 - **Hot-reloadable, layered, validated configuration** for every scanner threshold (§20).
@@ -55,8 +59,10 @@ src/
     monitoring/  Metrics surface (§17)
     engine.py    Orchestrator; assembler.py builds Signals from candidates
   database/      SQLAlchemy models, repositories, Alembic migrations
-  services/      user, subscription, notification, favorites, history, search,
-                 analytics, admin, support, scheduler, signal registry, engine bridge
+  services/      user, subscription, product catalog, purchase lifecycle, signal
+                 access (Free quota/paywall), notification, favorites, history, search,
+                 analytics, admin, support, scheduler, signal registry, engine bridge,
+                 payments (crypto provider port)
   bot/           aiogram handlers, keyboards, middlewares, formatters, i18n, notifier
   app.py         Composition root (DI) — wires everything, runs bot + engine
 tests/           unit + integration (pytest)
@@ -94,7 +100,7 @@ The app auto-creates the schema on first run when using SQLite. For Postgres, ru
 ### Run (Docker — Postgres + Redis + migrations + bot)
 
 ```bash
-cp .env.example .env      # set BOT_TOKEN, ADMIN_USER_IDS, RPC URLs, etc.
+cp .env.example .env      # set BOT_TOKEN, ADMIN_TELEGRAM_IDS, RPC URLs, etc.
 docker compose up --build
 ```
 
@@ -122,14 +128,13 @@ Two configuration surfaces:
 | `BOT_TOKEN` | Telegram bot token (BotFather) | — (required) |
 | `BOT_USERNAME` | Bot username for deep links | `arb_bot` |
 | `TELEGRAM_WEBHOOK_SECRET` | Webhook secret token verification (NFR-SEC-02) | — |
-| `ADMIN_USER_IDS` | CSV of Telegram user_ids granted Admin (R-ROLE-1) | empty |
+| `ADMIN_TELEGRAM_IDS` | CSV of Telegram user_ids granted Admin (R-ROLE-1); always Pro | empty |
 | `SUPPORT_USER_IDS` | CSV of Telegram user_ids granted Support | empty |
 | `DATABASE_URL` | Async SQLAlchemy URL (`postgresql+asyncpg://…` or `sqlite+aiosqlite://…`) | sqlite |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | Connection pool sizing | 20 / 10 |
 | `REDIS_URL` | Redis (cooldown/rate-limit/future shared cache) | `redis://localhost:6379/0` |
-| `TELEGRAM_PAYMENTS_PROVIDER_TOKEN` | Payments provider token | empty |
 | `PAYMENT_WEBHOOK_SECRET` | Payment webhook verification (NFR-SEC-03) | — |
-| `PRICE_BASIC_USD` / `PRICE_PRO_USD` | Tier pricing | 19 / 79 |
+| `PRICE_PRO_LIFETIME_USD` | One-time Pro Lifetime price; the only place a price is set | 20 |
 | `*_REST_URL` / `*_WS_URL` | Per-CEX official REST/WS endpoints (ARCH-2) | public endpoints |
 | `*_RPC_URLS` | Per-network CSV of ≥2 RPC providers (§2.4 failover). Listed URLs are tried before built-in public fallbacks; the pool then ranks by live latency. **Prod requires ≥2 paid providers first on `ETHEREUM_RPC_URLS`/`BNB_RPC_URLS`** — public nodes caused sustained `rpc_all_providers_failed` outages. | empty |
 | `ANKR_API_KEY` | Enables authenticated Ankr endpoints (`rpc.ankr.com/<chain>/<key>`). Empty → unauthenticated Ankr URLs are dropped from rotation. | empty |
@@ -145,7 +150,7 @@ Two configuration surfaces:
 
 1. Provision Postgres + Redis (managed services recommended).
 2. Set production env vars (`ENVIRONMENT=production`, real `DATABASE_URL`, `BOT_TOKEN`,
-   `ADMIN_USER_IDS`, funded RPC provider URLs with ≥2 per network).
+   `ADMIN_TELEGRAM_IDS`, funded RPC provider URLs with ≥2 per network).
 3. Run migrations: `alembic upgrade head`.
 4. Deploy the container (`docker/Dockerfile`) — runs as non-root, includes a healthcheck.
 5. Scale: the scanning engine is single-process for MVP (§1.5). Notification delivery and

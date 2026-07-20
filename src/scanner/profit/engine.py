@@ -42,21 +42,43 @@ class ProfitEngine:
         # Gross uses best (top-of-book) prices; slippage captured separately (§8.7).
         gross = base_size * (sell_best - buy_best)
 
-        # Slippage cost per leg (§8.7) — buy fills worse (higher), sell fills worse (lower).
-        buy_slip = (buy_fill - buy_best) * base_size
-        sell_slip = (sell_best - sell_fill) * base_size
-        slippage_cost = max(Decimal(0), buy_slip) + max(Decimal(0), sell_slip)
+        # Execution cost per leg (§8.7) — buy fills worse (higher), sell worse (lower).
+        buy_slip = max(Decimal(0), (buy_fill - buy_best) * base_size)
+        sell_slip = max(Decimal(0), (sell_best - sell_fill) * base_size)
+        execution_cost = buy_slip + sell_slip
 
+        # Fees charged on top of the fill price: a CEX taker fee settles outside the
+        # book, so none of it is in the fill. A DEX leg's rate is 0 here (assembler) —
+        # its pool fee is inside the fill and is recovered below.
         buy_fee = fees.buy_fee_rate or Decimal(0)
         sell_fee = fees.sell_fee_rate or Decimal(0)
-        trading_fees = base_size * buy_best * buy_fee + base_size * sell_best * sell_fee
+        rate_fees = base_size * buy_best * buy_fee + base_size * sell_best * sell_fee
 
         withdrawal = fees.withdrawal_fee_usd or Decimal(0)
         gas = fees.gas_fee_usd or Decimal(0)
         bridge = fees.bridge_fee_usd or Decimal(0)
         conversion = size_usd * fees.conversion_cost_bps / Decimal(10000)
 
-        net = gross - trading_fees - withdrawal - gas - bridge - slippage_cost - conversion
+        # Net is deliberately computed from the two *aggregate* costs, in the exact
+        # association this engine has always used. The reclassification below only
+        # redistributes `execution_cost` between the two reported fields, and doing it
+        # after this line means it cannot perturb net/ROI even in the last Decimal ulp
+        # (Decimal carries 28 significant digits; re-associating the sum moves the final
+        # digit, which is how a pure relabel could otherwise leak into the totals).
+        net = gross - rate_fees - withdrawal - gas - bridge - execution_cost - conversion
+
+        # ── reporting split (no effect on any total) ──
+        # For an AMM leg, execution_cost is two different things added together: the
+        # pool's swap fee, skimmed off the input before the curve, and genuine price
+        # impact from our size. Reporting them as one number showed paying users
+        # "Trading fees: $0.00" beside a slippage figure inflated by what is a fee.
+        # Each leg's attribution is capped at the cost that leg actually incurred, so
+        # the split can never manufacture or lose value: the two fields still sum to
+        # rate_fees + execution_cost.
+        pool_fees = (min(buy_leg.pool_fee_cost_usd(size_usd), buy_slip)
+                     + min(sell_leg.pool_fee_cost_usd(size_usd), sell_slip))
+        trading_fees = rate_fees + pool_fees
+        slippage_cost = execution_cost - pool_fees
         capital = size_usd  # buy-side notional (+margin handled by funding detector)
         roi = (net / capital * Decimal(100)) if capital else Decimal(0)
         gross_spread_pct = (((sell_best - buy_best) / buy_best * Decimal(100))

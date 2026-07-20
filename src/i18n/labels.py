@@ -12,6 +12,7 @@ never localize.
 from __future__ import annotations
 
 from src.domain.enums import ArbitrageType, RiskScore, SignalStatus, SubscriptionTier
+from src.domain.purchase import PurchaseStatus
 from src.i18n.translator import t
 
 _RISK_KEY = {
@@ -38,8 +39,15 @@ _ARB_KEY = {
 }
 _TIER_KEY = {
     SubscriptionTier.FREE: "tier.free",
-    SubscriptionTier.BASIC: "tier.basic",
-    SubscriptionTier.PRO: "tier.pro",
+    SubscriptionTier.PRO_LIFETIME: "tier.pro_lifetime",
+}
+_PURCHASE_STATUS_KEY = {
+    PurchaseStatus.CREATED: "purchase.created",
+    PurchaseStatus.PENDING: "purchase.pending",
+    PurchaseStatus.PAID: "purchase.paid",
+    PurchaseStatus.FAILED: "purchase.failed",
+    PurchaseStatus.CANCELLED: "purchase.cancelled",
+    PurchaseStatus.EXPIRED: "purchase.expired",
 }
 #: Filter field id -> catalog key. Keys mirror the ids used in callback data.
 _FILTER_KEY = {
@@ -84,6 +92,12 @@ def tier_label(tier: SubscriptionTier | str, lang: str) -> str:
     if isinstance(tier, str):
         tier = SubscriptionTier(tier)
     return t(_TIER_KEY[tier], lang)
+
+
+def purchase_status_label(status: PurchaseStatus | str, lang: str) -> str:
+    if isinstance(status, str):
+        status = PurchaseStatus(status)
+    return t(_PURCHASE_STATUS_KEY[status], lang)
 
 
 def filter_label(field: str, lang: str) -> str:

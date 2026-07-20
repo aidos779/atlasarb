@@ -149,7 +149,10 @@ class V2DexAdapter(_PoolDexAdapter):
         super().__init__(settings, config, sink, network, venue_id, factory,
                          fallback_pools, **kw)
         self._fee_tier = fee_tier
-        self._taker_fee = fee_tier  # actual pool fee, not the generic 0.3% default
+        # V2 has one fee tier per factory, so taker_fee() can carry the real rate.
+        # Not used by the spot profit pipeline either way (see _charges_flat_taker_fee):
+        # the pool fee reaches the maths through book.pool_fee_tier / DexPoolLeg.
+        self._taker_fee = fee_tier
 
     _calls_per_pool = 1
 
@@ -173,8 +176,12 @@ class V3DexAdapter(_PoolDexAdapter):
         super().__init__(settings, config, sink, network, venue_id, factory,
                          fallback_pools or [], **kw)
         self._fee_tiers = fee_tiers
-        # V3 fee is per-pool (varies by tier); taker_fee comes off each pool's tier
-        # at read time via book.pool_fee_tier, so no single adapter-wide default.
+        # V3 fee is per-pool (0.01% / 0.05% / 0.3% / 1%), so there is no adapter-wide
+        # value to set here and taker_fee() stays at the base flat 0.3%. That is
+        # deliberate and harmless: the spot profit pipeline does not read taker_fee()
+        # for DEX legs at all. Each pool's real tier reaches the maths as
+        # book.pool_fee_tier -> DexPoolLeg.fee_rate -> mathx.amm_output, i.e. through
+        # the fill price. See assembler._charges_flat_taker_fee.
 
     _calls_per_pool = 2
 

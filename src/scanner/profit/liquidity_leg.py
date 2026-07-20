@@ -31,6 +31,20 @@ class LiquidityLeg(ABC):
     def liquidity_usd(self, max_slippage_pct: Decimal) -> Decimal:
         """Executable USD liquidity within tolerance (feeds §9 liquidity floor)."""
 
+    def pool_fee_cost_usd(self, size_usd: Decimal) -> Decimal:
+        """USD value of any venue fee *already embedded* in ``fill_price``.
+
+        Concrete (not abstract) and zero by default: only an AMM takes its fee out of
+        the swap itself, so only that leg type has a fee hiding inside its fill price.
+        A CEX fee settles outside the book and is charged from the resolved fee rate,
+        so returning 0 here is correct rather than merely a placeholder.
+
+        The profit engine uses this to move the pool fee out of the raw fill-vs-best
+        difference and into trading fees, so the two reported costs mean what their
+        labels say. It is a reclassification only — never an extra deduction.
+        """
+        return Decimal(0)
+
 
 class CexBookLeg(LiquidityLeg):
     """CEX leg — walks the L2 book (VWAP method, §8.7)."""
@@ -119,3 +133,21 @@ class DexPoolLeg(LiquidityLeg):
     def liquidity_usd(self, max_slippage_pct: Decimal) -> Decimal:
         # DEX liquidity metric = tradeable value within tolerance (§5.4).
         return self.max_size_usd(max_slippage_pct)
+
+    def pool_fee_cost_usd(self, size_usd: Decimal) -> Decimal:
+        """The pool's swap fee for this fill, in USD (§5.4).
+
+        An AMM skims ``fee_rate * amount_in`` off the input before it ever touches the
+        curve (``mathx.amm_output``: ``amount_in * (1 - fee_rate)``). So the fee is a
+        flat fraction of the input, fixed by the tier alone and independent of reserves
+        or trade size relative to depth — unlike price impact, which is pure curve.
+
+        Both sides come to the same expression:
+
+        * buy  — input is quote (≈ USD), so the fee is ``fee_rate * size_usd`` directly;
+        * sell — input is base, ``base_in = size_usd / spot``, and the fee
+          ``fee_rate * base_in`` valued back at spot is again ``fee_rate * size_usd``.
+        """
+        if size_usd <= 0:
+            return Decimal(0)
+        return self.fee_rate * size_usd

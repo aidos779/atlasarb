@@ -112,18 +112,15 @@ class UserRole(StrEnum):
 
 
 class SubscriptionTier(StrEnum):
-    """PRD §15."""
+    """Two-plan model: a delivery-capped Free tier and a one-time lifetime Pro purchase.
+
+    The monthly Basic/Pro tiers were retired — see migration 0003_two_plan_lifetime,
+    which repoints every paid row at PRO_LIFETIME. There is no recurring billing, so
+    there is no subscription *status* either: the tier alone is the entitlement.
+    """
 
     FREE = "free"
-    BASIC = "basic"
-    PRO = "pro"
-
-
-class SubscriptionStatus(StrEnum):
-    ACTIVE = "active"
-    PAST_DUE = "past_due"
-    CANCELLED = "cancelled"
-    EXPIRED = "expired"
+    PRO_LIFETIME = "pro_lifetime"
 
 
 class Network(StrEnum):

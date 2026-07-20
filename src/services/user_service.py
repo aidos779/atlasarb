@@ -22,7 +22,7 @@ class UserService:
         self._settings = settings
 
     def _allowlist_role(self, user_id: int) -> UserRole | None:
-        if user_id in self._settings.admin_user_ids:
+        if user_id in self._settings.admin_telegram_ids:
             return UserRole.ADMIN
         if user_id in self._settings.support_user_ids:
             return UserRole.SUPPORT
@@ -76,7 +76,3 @@ class UserService:
     async def set_pending_deeplink(self, profile: UserProfile, payload: str | None) -> None:
         profile.pending_deeplink = payload
         await self.save(profile)
-
-    async def note_signal_viewed(self, user_id: int) -> None:
-        async with self._db.session() as session:
-            await UserRepository(session).increment_signals_viewed(user_id)

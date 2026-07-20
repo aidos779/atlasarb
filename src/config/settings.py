@@ -20,7 +20,7 @@ from pydantic_settings.sources import (
 # Fields that accept comma-separated env values instead of JSON arrays.
 _CSV_FIELDS = frozenset(
     {
-        "admin_user_ids",
+        "admin_telegram_ids",
         "support_user_ids",
         "ethereum_rpc_urls",
         "bnb_rpc_urls",
@@ -143,7 +143,10 @@ class Settings(BaseSettings):
     bot_token: str = _PLACEHOLDER_BOT_TOKEN
     bot_username: str = "arb_bot"
     telegram_webhook_secret: str = "change-me"
-    admin_user_ids: list[int] = Field(default_factory=list)
+    # ADMIN_TELEGRAM_IDS — operators listed here are resolved to the Administrator role
+    # on every touch (UserService._allowlist_role), which is what grants them permanent
+    # Pro access. No Telegram id is ever compared inside business logic.
+    admin_telegram_ids: list[int] = Field(default_factory=list)
     support_user_ids: list[int] = Field(default_factory=list)
 
     # ── Database / Redis ──
@@ -153,10 +156,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # ── Payments ──
-    telegram_payments_provider_token: str = ""
+    # No provider is wired yet (see services/payments). The webhook secret is validated
+    # for production now so the seam cannot be filled in later without one.
     payment_webhook_secret: str = "change-me-payment"
-    price_basic_usd: float = 19.0
-    price_pro_usd: float = 79.0
+    price_pro_lifetime_usd: float = 20.0
 
     # ── CEX endpoints ──
     # api.binance.com / stream.binance.com return HTTP 451 from restricted locations.
@@ -233,7 +236,7 @@ class Settings(BaseSettings):
         )
 
     @field_validator(
-        "admin_user_ids", "support_user_ids", mode="before"
+        "admin_telegram_ids", "support_user_ids", mode="before"
     )
     @classmethod
     def _parse_int_csv(cls, v: object) -> list[int]:
@@ -288,9 +291,9 @@ class Settings(BaseSettings):
             if not value or value == placeholder:
                 errors.append(f"{env_name} is unset or still the default placeholder")
 
-        if not self.admin_user_ids:
+        if not self.admin_telegram_ids:
             errors.append(
-                "ADMIN_USER_IDS is empty — no operator could reach the admin panel")
+                "ADMIN_TELEGRAM_IDS is empty — no operator could reach the admin panel")
 
         if not self.redis_url.strip():
             errors.append("REDIS_URL is unset")

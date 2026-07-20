@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.domain.entitlements import Entitlements, TierPricing
 from src.domain.user import UserProfile
-from src.i18n import filter_label, language_name, t, tier_label
+from src.i18n import filter_label, language_name, t
 
 
 def _nav(b: InlineKeyboardBuilder, lang: str, back: str = "nav:home") -> None:
@@ -83,13 +83,14 @@ def settings_menu(profile: UserProfile, lang: str) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def subscription_menu(profile: UserProfile, lang: str) -> InlineKeyboardMarkup:
+def subscription_menu(profile: UserProfile, lang: str, price_usd: float) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=t("subscription.compare_btn", lang), callback_data="sub:compare")
-    if profile.effective_tier.value != "pro":
-        b.button(text=t("subscription.upgrade_btn", lang), callback_data="sub:compare")
-    if profile.subscription.is_paid_active:
-        b.button(text=t("subscription.cancel_btn", lang), callback_data="sub:cancel")
+    # Pro is a one-time purchase, so the only action a Pro user has left is looking at
+    # the plans — nothing to upgrade to, nothing to cancel.
+    if not profile.subscription.is_pro:
+        b.button(text=t("subscription.buy_btn", lang, price=f"{price_usd:g}"),
+                 callback_data="sub:buy")
     b.adjust(1)
     _nav(b, lang)
     return b.as_markup()
@@ -100,26 +101,30 @@ def plan_comparison(pricing: list[TierPricing], lang: str) -> InlineKeyboardMark
     for plan in pricing:
         if plan.tier.value == "free":
             continue
-        b.button(text=t("subscription.choose_btn", lang,
-                        tier=tier_label(plan.tier, lang), price=f"{plan.monthly_usd:g}"),
-                 callback_data=f"sub:choose:{plan.tier.value}")
+        b.button(text=t("subscription.buy_btn", lang, price=f"{plan.price_usd:g}"),
+                 callback_data="sub:buy")
     b.adjust(1)
     _nav(b, lang, back="menu:subscription")
     return b.as_markup()
 
 
-def checkout_keyboard(tier: str, lang: str) -> InlineKeyboardMarkup:
+def checkout_keyboard(pay_url: str, lang: str) -> InlineKeyboardMarkup:
+    """Live checkout — a URL button straight to the provider's hosted invoice."""
     b = InlineKeyboardBuilder()
-    b.button(text=t("subscription.confirm", lang), callback_data=f"sub:confirm:{tier}")
-    b.button(text=t("nav.back", lang), callback_data="sub:compare")
+    b.button(text=t("subscription.pay_btn", lang), url=pay_url)
     b.adjust(1)
+    _nav(b, lang, back="menu:subscription")
     return b.as_markup()
 
 
-def retry_payment(tier: str, lang: str) -> InlineKeyboardMarkup:
+def paywall_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Paywall CTA. Deliberately keeps the full nav row: the quota closes the signal
+    feed, not the rest of the bot."""
     b = InlineKeyboardBuilder()
-    b.button(text=t("subscription.try_again", lang), callback_data=f"sub:confirm:{tier}")
-    b.row(InlineKeyboardButton(text=t("nav.home", lang), callback_data="nav:home"))
+    b.button(text=t("paywall.buy_btn", lang), callback_data="sub:buy")
+    b.button(text=t("subscription.compare_btn", lang), callback_data="sub:compare")
+    b.adjust(1)
+    _nav(b, lang)
     return b.as_markup()
 
 

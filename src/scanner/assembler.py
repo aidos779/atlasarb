@@ -42,6 +42,27 @@ from src.scanner.validation.validator import (
 log = get_logger("scanner.assembler")
 
 _GAS_UNITS_PER_SWAP = 150_000
+_DEX = "DEX"
+
+
+def _charges_flat_taker_fee(venue_type: str) -> bool:
+    """Whether a leg's fee must be charged *on top of* its fill price.
+
+    False for DEX legs. An AMM's fee is taken out of the input amount inside the pool
+    itself, and ``DexPoolLeg.fill_price`` already models that via ``mathx.amm_output``
+    (``amount_in * (1 - fee_rate)``, fee_rate = ``book.pool_fee_tier``). The resulting
+    worse execution price is picked up by the engine as slippage_cost, so the pool fee
+    is *already* in net profit. Adding ``adapter.taker_fee()`` on top charged it twice —
+    and, since DEX adapters return a flat 0.3% regardless of the pool's real tier, the
+    second charge was 6-30x too large for low-tier V3 pools (0.05% / 0.01%).
+
+    CEX legs are the opposite: an exchange's taker fee is settled outside the book, so
+    walking the L2 levels does not capture it and it must be charged explicitly.
+
+    Single source of truth for both the cheap pre-gate (_fee_floor_pct) and the real
+    pipeline (_resolve_fees) — the two must never disagree about what a leg costs.
+    """
+    return venue_type != _DEX
 _DEFAULT_HISTORICAL_RELIABILITY = Decimal(60)
 
 
@@ -98,6 +119,12 @@ class SignalAssembler:
         self._fee_rate_cache[venue] = rate
         return rate
 
+    def _leg_flat_fee_rate(self, venue: str, venue_type: str) -> Decimal | None:
+        """Pre-gate fee rate for one leg — 0 for DEX (see _charges_flat_taker_fee)."""
+        if not _charges_flat_taker_fee(venue_type):
+            return Decimal(0)
+        return self._fee_rate(venue)
+
     def _fee_floor_pct(self, cand: Candidate) -> Decimal | None:
         """Lower bound (in %) on the cost the spread must clear for any net profit.
 
@@ -106,9 +133,15 @@ class SignalAssembler:
         also charges. Every omitted cost (slippage/withdrawal/gas/bridge) is >= 0, so
         this stays a strict lower bound: a candidate skipped here is guaranteed to
         fail downstream too. Returns None (skip the pre-gate) if either venue's fee
-        rate is unknown, so nothing is ever wrongly rejected."""
-        buy_rate = self._fee_rate(cand.buy_leg.venue)
-        sell_rate = self._fee_rate(cand.sell_leg.venue)
+        rate is unknown, so nothing is ever wrongly rejected.
+
+        A DEX leg contributes 0 here (_charges_flat_taker_fee): its pool fee is
+        size-*dependent* — it lives inside the AMM fill price and surfaces as slippage,
+        which this bound deliberately omits. Counting it would break the lower-bound
+        property in the dangerous direction, rejecting candidates the full pipeline
+        would have published."""
+        buy_rate = self._leg_flat_fee_rate(cand.buy_leg.venue, cand.buy_leg.venue_type)
+        sell_rate = self._leg_flat_fee_rate(cand.sell_leg.venue, cand.sell_leg.venue_type)
         if buy_rate is None or sell_rate is None:
             return None
         floor = (buy_rate + sell_rate) * Decimal(100)
@@ -362,6 +395,13 @@ class SignalAssembler:
         return (self._cache.is_warmed_up(cand.buy_leg.venue, pair)
                 and self._cache.is_warmed_up(cand.sell_leg.venue, pair))
 
+    @staticmethod
+    def _leg_taker_fee(adapter: ExchangeAdapter | None, symbol, venue_type: str) -> Decimal | None:
+        """Charged-on-top taker fee for one leg; None only if the adapter is unknown."""
+        if not _charges_flat_taker_fee(venue_type):
+            return Decimal(0)
+        return adapter.taker_fee(symbol) if adapter else None
+
     async def _resolve_fees(self, cand: Candidate) -> FeeInputs:
         from src.domain.enums import VenueType
         from src.domain.market import CanonicalSymbol
@@ -373,8 +413,13 @@ class SignalAssembler:
                                   cand.buy_leg.network)
         sell_sym = CanonicalSymbol(cand.base_asset, cand.quote_asset, sell_type,
                                    cand.sell_leg.network)
-        buy_fee = buy_ad.taker_fee(buy_sym) if buy_ad else None
-        sell_fee = sell_ad.taker_fee(sell_sym) if sell_ad else None
+        # Flat (charged-on-top) taker fee per leg. DEX legs resolve to exactly 0 — their
+        # pool fee is already inside the AMM fill price and therefore already in
+        # slippage_cost; see _charges_flat_taker_fee. Zero, not None: the fee *is*
+        # resolved (it is nil at this layer), and None would read as unresolved and
+        # fail the §10 Fees gate as MISSING_FEE_DATA.
+        buy_fee = self._leg_taker_fee(buy_ad, buy_sym, cand.buy_leg.venue_type)
+        sell_fee = self._leg_taker_fee(sell_ad, sell_sym, cand.sell_leg.venue_type)
 
         arb = cand.arb_type
         requires_withdrawal = arb in (ArbitrageType.CEX_CEX, ArbitrageType.CEX_DEX)

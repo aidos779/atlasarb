@@ -6,18 +6,25 @@ from src.domain.signal import Signal
 from src.domain.user import UserFilter
 
 
-def test_free_tier_caps():
+def test_free_tier_is_quota_capped_but_feature_complete():
+    """Free is limited by delivered signals only — every feature stays open."""
     free = entitlements_for(SubscriptionTier.FREE)
-    assert free.signals_per_refresh == 5
-    assert free.max_favorite_coins == 3
-    assert not free.arb_type_allowed(ArbitrageType.CEX_DEX)
-    assert not free.filter_allowed("network")
-    assert free.can_add_favorite("coin", 2) is True
-    assert free.can_add_favorite("coin", 3) is False
+    assert free.signal_quota == 5
+    assert free.unlimited_signals is False
+    # No feature is withheld from Free under the two-plan model.
+    assert free.arb_type_allowed(ArbitrageType.CEX_DEX)
+    assert free.arb_type_allowed(ArbitrageType.CROSS_CHAIN)
+    assert free.filter_allowed("network")
+    assert free.filter_allowed("risk")
+    assert free.history_enabled and free.details_advanced
+    assert free.favorite_entity_alerts
+    assert free.signal_delay_sec == 0
+    assert free.can_add_favorite("coin", 9999) is True
 
 
-def test_pro_tier_unlimited():
-    pro = entitlements_for(SubscriptionTier.PRO)
+def test_pro_lifetime_is_unlimited():
+    pro = entitlements_for(SubscriptionTier.PRO_LIFETIME)
+    assert pro.unlimited_signals is True
     assert pro.can_add_favorite("coin", 9999) is True
     assert pro.arb_type_allowed(ArbitrageType.CROSS_CHAIN)
     assert pro.filter_allowed("risk")

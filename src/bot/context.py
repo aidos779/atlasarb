@@ -17,9 +17,13 @@ from src.services.analytics_service import AnalyticsService
 from src.services.favorites_service import FavoritesService
 from src.services.history_service import HistoryService
 from src.services.notification_service import NotificationService
+from src.services.payments import PaymentProvider
+from src.services.product_catalog import ProductCatalog
+from src.services.purchase_service import PurchaseService
 from src.services.rate_limiter import SlidingWindowLimiter
 from src.services.scheduler import BackgroundScheduler
 from src.services.search_service import SearchService
+from src.services.signal_access_service import SignalAccessService
 from src.services.signal_registry import SignalRegistry
 from src.services.subscription_service import SubscriptionService
 from src.services.support_service import SupportService
@@ -46,3 +50,10 @@ class BotContext:
     fx: FxRateProvider
     refresh_limiter: SlidingWindowLimiter
     exchange_names: dict[str, str]
+    signal_access: SignalAccessService
+    #: Crypto checkout port. A PlaceholderPaymentProvider until a processor is wired up.
+    payments: PaymentProvider
+    #: Product/pricing catalogue — the only source of an amount to charge.
+    products: ProductCatalog
+    #: Purchase lifecycle (CREATED -> PENDING -> PAID -> activation).
+    purchases: PurchaseService

@@ -37,9 +37,9 @@ def test_dev_unlimited_access_grants_pro():
         set_unlimited_access(True)
         assert unlimited_access_enabled()
         u = UserProfile(telegram_user_id=1)   # default FREE subscription
-        assert u.effective_tier == SubscriptionTier.PRO
+        assert u.effective_tier == SubscriptionTier.PRO_LIFETIME
         ent = entitlements_for(SubscriptionTier.FREE)
-        assert ent.tier == SubscriptionTier.PRO
+        assert ent.tier == SubscriptionTier.PRO_LIFETIME
         assert ent.history_enabled and ent.signal_delay_sec == 0
     finally:
         set_unlimited_access(False)

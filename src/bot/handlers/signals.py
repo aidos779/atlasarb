@@ -16,7 +16,7 @@ from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.signal import format_details
 from src.bot.handlers.common import SESSIONS, render_signal_list
-from src.bot.keyboards.inline import details_buttons, upsell_keyboard
+from src.bot.keyboards.inline import details_buttons
 from src.domain.signal import Signal
 from src.domain.user import UserProfile
 from src.i18n import favorite_kind_label, t, translations_of
@@ -122,7 +122,7 @@ async def send_details(target: Message, ctx: BotContext, profile: UserProfile,
     is_fav = signal.id in fav_ids
     kb = details_buttons(signal, is_fav, ctx.settings.bot_username, lang)
     await target.answer(text, reply_markup=kb, disable_web_page_preview=True)
-    # Record view for history (§17.4) + usage stat.
+    # Record view for history (§17.4). Details deliberately does not touch the Free
+    # quota: this signal was already charged when it was delivered (list or alert), and
+    # re-reading something you were given is not a new delivery.
     await ctx.history.record_view(profile.telegram_user_id, signal)
-    await ctx.users.note_signal_viewed(profile.telegram_user_id)
-    _ = upsell_keyboard  # referenced for lint clarity

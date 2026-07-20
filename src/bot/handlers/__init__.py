@@ -29,6 +29,9 @@ async def unknown_command(message: Message, profile: UserProfile) -> None:
 
 
 def register_handlers(dp: Dispatcher) -> None:
+    # Admin first: its /subscription handler matches only the `<telegram_id>` argument
+    # form, so the bare command still falls through to the user-facing screen below.
+    dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(signals.router)
     dp.include_router(search.router)
@@ -39,5 +42,4 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.include_router(notifications.router)
     dp.include_router(profile.router)
     dp.include_router(support.router)
-    dp.include_router(admin.router)
     dp.include_router(fallback)

@@ -8,8 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
-from src.bot.keyboards.inline import back_home, upsell_keyboard
-from src.domain.entitlements import entitlements_for
+from src.bot.keyboards.inline import back_home
 from src.domain.user import UserProfile
 from src.i18n import t, tier_label
 
@@ -66,10 +65,6 @@ async def menu_analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfil
 @router.message(Command("history"))
 async def cmd_history(message: Message, ctx: BotContext, profile: UserProfile) -> None:
     lang = profile.settings.language.value
-    ent = entitlements_for(profile.effective_tier)
-    if not ent.history_enabled:  # BR-HIST-1
-        await message.answer(t("history.upsell", lang), reply_markup=upsell_keyboard(lang))
-        return
     viewed = await ctx.history.viewed(profile.telegram_user_id)
     expired = await ctx.history.expired(profile.telegram_user_id)
     fav = await ctx.history.favorites_history(profile.telegram_user_id)

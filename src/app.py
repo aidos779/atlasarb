@@ -56,9 +56,13 @@ from src.services.engine_bridge import EngineBridge
 from src.services.favorites_service import FavoritesService
 from src.services.history_service import HistoryService
 from src.services.notification_service import NotificationService
+from src.services.payments import PlaceholderPaymentProvider
+from src.services.product_catalog import ProductCatalog
+from src.services.purchase_service import PurchaseService
 from src.services.rate_limiter import SlidingWindowLimiter
 from src.services.scheduler import BackgroundScheduler
 from src.services.search_service import SearchService
+from src.services.signal_access_service import SignalAccessService
 from src.services.signal_registry import SignalRegistry
 from src.services.subscription_service import SubscriptionService
 from src.services.support_service import SupportService
@@ -183,16 +187,23 @@ class Application:
 
         # Services.
         users = UserService(self.database, self.settings)
-        subscriptions = SubscriptionService(self.database, self.settings)
+        catalog = ProductCatalog(self.settings)
+        subscriptions = SubscriptionService(self.database, self.settings, catalog)
         favorites = FavoritesService(self.database)
         history = HistoryService(self.database)
         search = SearchService(self.registry, exchange_names)
         analytics = AnalyticsService(self.registry, self.engine)
         admin = AdminService(self.database, self.engine)
         support = SupportService(self.database)
+        signal_access = SignalAccessService(self.database, catalog)
+        # No crypto processor is wired yet; the placeholder refuses checkout rather than
+        # pretending it succeeded. Swap in a real adapter here (see services/payments).
+        payments = PlaceholderPaymentProvider()
+        purchases = PurchaseService(self.database, subscriptions, payments)
         self.notifications = NotificationService(
             self.database, self.bridge, lambda: self.config_manager.config,
-            on_sent=self.engine.metrics.record_notification_sent)
+            on_sent=self.engine.metrics.record_notification_sent,
+            signal_access=signal_access)
         self.scheduler = BackgroundScheduler(self.database, self.registry, subscriptions)
 
         self.ctx = BotContext(
@@ -202,7 +213,8 @@ class Application:
             admin=admin, support=support, notifications=self.notifications,
             scheduler=self.scheduler, registry=self.registry, engine=self.engine,
             fx=self.fx, refresh_limiter=SlidingWindowLimiter(1, 3.0),
-            exchange_names=exchange_names,
+            exchange_names=exchange_names, signal_access=signal_access,
+            payments=payments, products=catalog, purchases=purchases,
         )
 
         self.bot = Bot(

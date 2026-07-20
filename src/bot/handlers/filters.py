@@ -16,17 +16,15 @@ from src.bot.states.states import FilterStates
 from src.domain.entitlements import entitlements_for
 from src.domain.enums import ArbitrageType, Network
 from src.domain.user import UserFilter, UserProfile
-from src.i18n import filter_label, t, tier_label
+from src.i18n import filter_label, t
 
 router = Router(name="filters")
 
 _NUMERIC = {"min_profit", "liquidity", "signal_age", "risk"}
 _STEP = {"min_profit": Decimal("0.1"), "liquidity": Decimal("500"),
          "signal_age": Decimal("15"), "risk": Decimal("1")}
-# Minimum tier each gated filter requires — rendered via tier_label so the upsell
-# names the plan in the user's language.
-_TIER_NAME = {"network": "basic", "liquidity": "basic", "arbitrage_type": "basic",
-              "risk": "pro", "signal_age": "pro"}
+# Every filter is available on both plans (the plans differ only in signal quota), so
+# there is no per-field tier gate here any more — see domain/entitlements.
 
 
 def _get_numeric(profile: UserProfile, field: str) -> Decimal:
@@ -62,12 +60,6 @@ async def open_panel(cb: CallbackQuery, profile: UserProfile) -> None:
 async def edit_filter(cb: CallbackQuery, profile: UserProfile) -> None:
     field = cb.data.split(":")[-1]
     lang = profile.settings.language.value
-    ent = entitlements_for(profile.effective_tier)
-    if not ent.filter_allowed(field):
-        await ack(cb, t("filters.upsell", lang, filter=filter_label(field, lang),
-                        tier=tier_label(_TIER_NAME.get(field, "basic"), lang)),
-                  show_alert=True)
-        return
     await ack(cb)
     if field in _NUMERIC:
         await cb.message.edit_text(
@@ -149,25 +141,10 @@ async def toggle_multiselect(cb: CallbackQuery, ctx: BotContext, profile: UserPr
         toggled = _toggle(frozenset(current), value)
         f.arb_types = frozenset(ArbitrageType(v) for v in toggled)
     elif field == "exchange":
-        # Free tier max 1 exchange (§12.3).
-        ent = entitlements_for(profile.effective_tier)
-        newset = _toggle(f.exchanges, value)
-        if ent.tier.value == "free" and len(newset) > 1:
-            await ack(cb, t("filters.upsell", lang,
-                            filter=t("filters.multiple_exchanges", lang),
-                            tier=tier_label("basic", lang)), show_alert=True)
-            return
-        f.exchanges = newset
+        f.exchanges = _toggle(f.exchanges, value)
     else:  # coin
-        ent = entitlements_for(profile.effective_tier)
-        newset = _toggle(f.coins, value)
-        if ent.tier.value == "free" and len(newset) > 3:
-            await ack(cb, t("filters.upsell", lang,
-                            filter=t("filters.more_coins", lang),
-                            tier=tier_label("basic", lang)), show_alert=True)
-            return
-        f.coins = newset
-    # All gating above is in-memory — ack now, before the DB save and edit round trip.
+        f.coins = _toggle(f.coins, value)
+    # Selection is in-memory — ack now, before the DB save and edit round trip.
     await ack(cb)
     await ctx.users.save(profile)
     options, selected = _multiselect_options(field, profile, None)

@@ -19,7 +19,7 @@ def _prod(**overrides) -> Settings:
         database_url="postgresql+asyncpg://u:p@db/arb",
         telegram_webhook_secret="real-webhook-secret",
         payment_webhook_secret="real-payment-secret",
-        admin_user_ids=[999],
+        admin_telegram_ids=[999],
     )
     return Settings(**{**base, **overrides})
 
@@ -47,7 +47,7 @@ def test_non_production_is_never_checked():
     ({"database_url": "sqlite+aiosqlite:///./arb.db"}, "SQLite"),
     ({"telegram_webhook_secret": "change-me"}, "TELEGRAM_WEBHOOK_SECRET"),
     ({"payment_webhook_secret": "change-me-payment"}, "PAYMENT_WEBHOOK_SECRET"),
-    ({"admin_user_ids": []}, "ADMIN_USER_IDS"),
+    ({"admin_telegram_ids": []}, "ADMIN_TELEGRAM_IDS"),
 ])
 def test_each_dev_default_is_rejected(overrides, marker):
     errors = _prod(**overrides).production_config_errors()
@@ -57,7 +57,7 @@ def test_each_dev_default_is_rejected(overrides, marker):
 def test_all_errors_reported_at_once():
     """One restart per broken key would make a bad deploy an N-restart loop."""
     errors = _prod(bot_token="TEST:TOKEN", database_url="sqlite+aiosqlite:///./a.db",
-                   admin_user_ids=[]).production_config_errors()
+                   admin_telegram_ids=[]).production_config_errors()
     assert len(errors) >= 3
 
 
