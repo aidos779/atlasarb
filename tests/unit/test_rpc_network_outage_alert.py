@@ -29,9 +29,12 @@ def test_sustained_outage_emits_alert_then_recovery():
     pool = RpcProviderPool(urls=["u1", "u2"], fail_threshold=1, network="bnb")
     stub = _engine_stub(pool, "bnb", cfg)
 
-    # Both providers down → network fully dark.
-    pool.record_failure("u1", RpcErrorKind.TIMEOUT)
-    pool.record_failure("u2", RpcErrorKind.TIMEOUT)
+    # Both providers down → network fully dark. A pure-timeout streak needs
+    # fail_threshold x 2 strikes before the breaker trips (timeouts are often latency
+    # spikes, not dead endpoints), so a sustained outage records two per provider.
+    for _ in range(2):
+        pool.record_failure("u1", RpcErrorKind.TIMEOUT)
+        pool.record_failure("u2", RpcErrorKind.TIMEOUT)
     assert pool.healthy_count() == (0, 2)
 
     # First observation: tracked, but below the threshold → no alert yet.

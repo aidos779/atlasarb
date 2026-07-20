@@ -118,9 +118,19 @@ class HealthRegistry:
             # a truly offline state (Maintenance / API Offline) — that is where anti-flap
             # matters. Without the UNKNOWN/DEGRADED fast paths an alternating check leaves a
             # venue stuck out of signal generation.
+            #
+            # Recovery must carry market data for a venue that has ever streamed
+            # (last_ws_data_at > 0): staleness of the stream is what demoted it, so only
+            # stream-bearing successes may bring it back. Recovering on bare REST/RPC
+            # probe successes re-created the production DEX loop — eth_blockNumber
+            # answering while pool reads stayed dead cycled the venue
+            # Online → (venue_stale) Maintenance → API Offline → Online forever.
+            # A probe-only venue (never streamed) still recovers on probe successes.
+            stream_ok = stream or h.last_ws_data_at == 0
             if (h.status == ExchangeStatus.UNKNOWN
                     or (h.status == ExchangeStatus.DEGRADED and stream)
-                    or h.consecutive_success >= self._config.health_recovery_consecutive):
+                    or (stream_ok and h.consecutive_success
+                        >= self._config.health_recovery_consecutive)):
                 self._transition(venue, ExchangeStatus.ONLINE)
 
     def record_failure(self, venue: str, hard: bool = False) -> None:

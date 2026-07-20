@@ -320,8 +320,9 @@ def test_pool_prefers_primary_tier_then_falls_back_when_unhealthy():
     pool.record_success("paid", latency_ms=200)
     pool.record_success("public", latency_ms=50)   # faster, but a fallback
     assert pool.order()[0] == "paid"               # tier wins over raw latency
-    # Primary goes down → fallback serves alone.
-    for _ in range(2):
+    # Primary goes down → fallback serves alone. Pure-timeout streaks trip the breaker
+    # at fail_threshold x 2 (timeouts are often latency spikes, not dead endpoints).
+    for _ in range(4):
         pool.record_failure("paid", RpcErrorKind.TIMEOUT)
     assert pool.order() == ["public"]
     # Primary recovers → it leads again.

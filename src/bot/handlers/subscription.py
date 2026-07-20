@@ -13,6 +13,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
 from src.bot.keyboards.screens import (
@@ -27,7 +28,10 @@ from src.i18n import t, tier_label, translations_of
 router = Router(name="subscription")
 
 
-async def _show_subscription(event, ctx: BotContext, profile: UserProfile) -> None:
+async def _show_subscription(event, ctx: BotContext, profile: UserProfile,
+                             need_ack: bool = True) -> None:
+    if need_ack and isinstance(event, CallbackQuery):
+        await ack(event)
     lang = profile.settings.language.value
     ent = ctx.subscriptions.entitlements(profile)
     lines = [t("subscription.title", lang), "",
@@ -43,7 +47,6 @@ async def _show_subscription(event, ctx: BotContext, profile: UserProfile) -> No
     text = "\n".join(lines)
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(text, reply_markup=kb)
-        await event.answer()
     else:
         await event.answer(text, reply_markup=kb)
 
@@ -65,6 +68,7 @@ async def menu_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserPro
 
 @router.callback_query(F.data == "sub:compare")
 async def compare_plans(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     pricing = ctx.subscriptions.pricing()
     lines = [f"<b>{t('subscription.compare_title', lang)}</b>", ""]
@@ -78,11 +82,11 @@ async def compare_plans(cb: CallbackQuery, ctx: BotContext, profile: UserProfile
             lines.append(f"  • {feat}")
         lines.append("")
     await cb.message.edit_text("\n".join(lines), reply_markup=plan_comparison(pricing, lang))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("sub:choose:"))
 async def choose_plan(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
     tier = cb.data.split(":")[-1]
     lang = profile.settings.language.value
     target = SubscriptionTier(tier)
@@ -97,11 +101,11 @@ async def choose_plan(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) 
         t("subscription.pay_hint", lang),
     ])
     await cb.message.edit_text(text, reply_markup=checkout_keyboard(tier, lang))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("sub:confirm:"))
 async def confirm_payment(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
     tier = cb.data.split(":")[-1]
     lang = profile.settings.language.value
     target = SubscriptionTier(tier)
@@ -113,16 +117,16 @@ async def confirm_payment(cb: CallbackQuery, ctx: BotContext, profile: UserProfi
         from src.bot.keyboards.screens import retry_payment
         await cb.message.edit_text(t("subscription.payment_failed", lang),
                                    reply_markup=retry_payment(tier, lang))
-        await cb.answer()
         return
     updated = await ctx.subscriptions.activate(profile.telegram_user_id, target, charge)
     await cb.message.edit_text(
         t("subscription.upgraded", lang, tier=tier_label(target, lang)))
-    await _show_subscription(cb, ctx, updated)
+    await _show_subscription(cb, ctx, updated, need_ack=False)
 
 
 @router.callback_query(F.data == "sub:cancel")
 async def cancel_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     updated = await ctx.subscriptions.cancel(profile.telegram_user_id)
     date = (format_datetime(updated.subscription.period_end, profile.settings.timezone)
@@ -131,4 +135,3 @@ async def cancel_subscription(cb: CallbackQuery, ctx: BotContext, profile: UserP
     await cb.message.edit_text(
         t("subscription.cancelled", lang,
           tier=tier_label(updated.subscription.tier, lang), date=date))
-    await cb.answer()

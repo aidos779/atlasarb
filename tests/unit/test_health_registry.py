@@ -136,3 +136,36 @@ def test_cex_staleness_still_single_stage_maintenance():
     quiet = r.health("mexc").last_ws_data_at + 999
     r.check_staleness("mexc", threshold_sec=15.0, now=quiet)
     assert r.status("mexc") == ExchangeStatus.MAINTENANCE
+
+
+def test_streamed_venue_does_not_recover_on_probe_only_success():
+    """Production DEX loop: a venue that HAS streamed (a DEX pool feed) must not bounce
+    back to Online on bare RPC-probe successes (eth_blockNumber) while its pool reads
+    stay dead — that recreated Online → Maintenance → API Offline → Online churn.
+    Recovery requires a real market-data (stream=True) tick."""
+    r = HealthRegistry(ScannerConfig())
+    r.register("uniswap_ethereum")
+    r.record_success("uniswap_ethereum", stream=True)     # venue has a live feed
+    assert r.status("uniswap_ethereum") == ExchangeStatus.ONLINE
+    r.mark_maintenance("uniswap_ethereum")                # stream went stale
+    # Many probe-only (eth_blockNumber) successes: RPC is up, but no pool data.
+    for _ in range(10):
+        r.record_success("uniswap_ethereum", stream=False)
+        assert r.status("uniswap_ethereum") == ExchangeStatus.MAINTENANCE
+    # Real pool reads resume → recovers (consecutive_success already high → first tick).
+    r.record_success("uniswap_ethereum", stream=True)
+    assert r.status("uniswap_ethereum") == ExchangeStatus.ONLINE
+
+
+def test_streamed_venue_recovers_on_sustained_real_data():
+    """Sanity: recovery from API Offline still works, driven purely by stream ticks."""
+    r = HealthRegistry(ScannerConfig())
+    r.register("uniswap_ethereum")
+    r.record_success("uniswap_ethereum", stream=True)
+    r.mark_offline("uniswap_ethereum")
+    cfg = ScannerConfig()
+    for _ in range(cfg.health_recovery_consecutive - 1):
+        r.record_success("uniswap_ethereum", stream=True)
+        assert r.status("uniswap_ethereum") == ExchangeStatus.API_OFFLINE
+    r.record_success("uniswap_ethereum", stream=True)
+    assert r.status("uniswap_ethereum") == ExchangeStatus.ONLINE

@@ -5,6 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.keyboards.inline import currency_keyboard, language_keyboard, timezone_keyboard
 from src.bot.keyboards.reply import main_reply_keyboard
@@ -16,12 +17,13 @@ from src.i18n import language_name, t, translations_of
 router = Router(name="settings")
 
 
-async def _show_settings(event, profile: UserProfile) -> None:
+async def _show_settings(event, profile: UserProfile, need_ack: bool = True) -> None:
     lang = profile.settings.language.value
     kb = settings_menu(profile, lang)
     if isinstance(event, CallbackQuery):
+        if need_ack:
+            await ack(event)
         await event.message.edit_text(t("settings.title", lang), reply_markup=kb)
-        await event.answer()
     else:
         await event.answer(t("settings.title", lang), reply_markup=kb)
 
@@ -43,28 +45,29 @@ async def menu_settings(cb: CallbackQuery, profile: UserProfile) -> None:
 
 @router.callback_query(F.data == "settings:language")
 async def choose_language(cb: CallbackQuery, profile: UserProfile) -> None:
+    await ack(cb)
     await cb.message.edit_text(t("onboarding.language", profile.settings.language.value),
                                reply_markup=language_keyboard("set:lang"))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "settings:timezone")
 async def choose_timezone(cb: CallbackQuery, profile: UserProfile) -> None:
+    await ack(cb)
     await cb.message.edit_text(t("onboarding.timezone", profile.settings.language.value),
                                reply_markup=timezone_keyboard("set:tz"))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "settings:currency")
 async def choose_currency(cb: CallbackQuery, profile: UserProfile) -> None:
+    await ack(cb)
     await cb.message.edit_text(t("onboarding.currency", profile.settings.language.value),
                                reply_markup=currency_keyboard("set:cur"))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("set:lang:"))
 async def set_language(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     code = cb.data.split(":")[-1]
+    await ack(cb)
     await ctx.users.set_language(profile, Language(code))
     profile.settings.language = Language(code)
     # Everything below re-renders in the NEW language: the confirmation, the persistent
@@ -73,26 +76,27 @@ async def set_language(cb: CallbackQuery, ctx: BotContext, profile: UserProfile)
         t("settings.updated", code, field=t("settings.field.language", code),
           value=language_name(code)),
         reply_markup=main_reply_keyboard(code))
-    await _show_settings(cb, profile)
+    await _show_settings(cb, profile, need_ack=False)
 
 
 @router.callback_query(F.data.startswith("set:tz:"))
 async def set_timezone(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     tz = cb.data.split(":", 2)[-1]
+    lang = profile.settings.language.value
+    # Toast first — its content is known before any I/O.
+    await ack(cb, t("settings.updated", lang, field=t("settings.field.timezone", lang),
+                    value=tz))
     await ctx.users.set_timezone(profile, tz)
     profile.settings.timezone = tz
-    lang = profile.settings.language.value
-    await cb.answer(t("settings.updated", lang, field=t("settings.field.timezone", lang),
-                      value=tz))
-    await _show_settings(cb, profile)
+    await _show_settings(cb, profile, need_ack=False)
 
 
 @router.callback_query(F.data.startswith("set:cur:"))
 async def set_currency(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     cur = cb.data.split(":")[-1]
+    lang = profile.settings.language.value
+    await ack(cb, t("settings.updated", lang, field=t("settings.field.currency", lang),
+                    value=cur))
     await ctx.users.set_currency(profile, Currency(cur))
     profile.settings.currency = Currency(cur)
-    lang = profile.settings.language.value
-    await cb.answer(t("settings.updated", lang, field=t("settings.field.currency", lang),
-                      value=cur))
-    await _show_settings(cb, profile)
+    await _show_settings(cb, profile, need_ack=False)

@@ -49,6 +49,15 @@ _detector_log_throttle = LogThrottle(interval_sec=60.0)
 # alert so it fires periodically (with a suppressed count), not every minute.
 _rpc_down_throttle = LogThrottle(interval_sec=300.0)
 
+# Maximum uninterrupted CPU time the detection hot loops may hold the event loop before
+# yielding. The full detection path (_process_symbol and everything under it, minus the
+# rare candidate that reaches the assembler) is pure sync work: awaiting it never
+# suspends, so a busy queue or a full-cache scan monopolized the loop for the entire
+# drain/scan (observed: 40+ s Telegram update latency). A time-budget yield bounds that
+# gap explicitly regardless of per-symbol cost, while paying the reschedule cost only
+# ~200×/s instead of once per symbol (~1M×/s), which would cut hot-loop throughput.
+_YIELD_BUDGET_SEC = 0.005
+
 
 class ScanningEngine:
     def __init__(
@@ -158,14 +167,23 @@ class ScanningEngine:
         self._event_queue.put(priority, (base, quote, venue))
 
     async def _generator_worker(self) -> None:
+        last_yield = time.monotonic()
         while not self._stop.is_set():
             try:
                 base, quote, _venue = await asyncio.wait_for(
                     self._event_queue.get(), timeout=1.0
                 )
             except TimeoutError:
+                # wait_for suspended for the full timeout — the loop just ran freely.
+                last_yield = time.monotonic()
                 continue
             await self._process_symbol(base, quote)
+            # get() returns via get_nowait() while events keep arriving, so nothing on
+            # this path is guaranteed to suspend — yield on budget (see _YIELD_BUDGET_SEC).
+            now = time.monotonic()
+            if now - last_yield >= _YIELD_BUDGET_SEC:
+                await asyncio.sleep(0)
+                last_yield = time.monotonic()
 
     async def _process_symbol(self, base: str, quote: str) -> None:
         started = time.perf_counter()
@@ -246,10 +264,17 @@ class ScanningEngine:
 
     # ── reconciliation safety net (§1.5) ──
     async def _run_full_scan(self) -> None:
+        last_yield = time.monotonic()
         for pair in self._cache.tracked_pairs():
             base, _, quote = pair.partition("/")
             if base and quote:
                 await self._process_symbol(base, quote)
+                # Same no-suspension-point hazard as _generator_worker: a full-cache
+                # scan is one long sync block without this budget yield.
+                now = time.monotonic()
+                if now - last_yield >= _YIELD_BUDGET_SEC:
+                    await asyncio.sleep(0)
+                    last_yield = time.monotonic()
         self._metrics.cache_size = self._cache.size()
         self._metrics.outliers = self._cache.outliers
         self._metrics.rejected_prices = self._cache.rejected_prices

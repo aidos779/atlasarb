@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import admin_menu
@@ -39,18 +40,19 @@ async def cmd_admin(message: Message, profile: UserProfile) -> None:
 @router.callback_query(F.data == "admin:menu")
 async def admin_home(cb: CallbackQuery, profile: UserProfile) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     await cb.message.edit_text(t("admin.title", profile.settings.language.value),
                                reply_markup=admin_menu(profile.settings.language.value))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "admin:monitoring")
 async def monitoring(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     data = ctx.admin.monitoring()
     status_lines = "\n".join(
         f"{v}: {s}" for v, s in data["exchange_status"].items())
@@ -75,26 +77,26 @@ async def monitoring(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -
           rejections=dict(list(m["rejections"].items())[:5])),
     ])
     await cb.message.edit_text(text, reply_markup=b.as_markup())
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("admin:kill:"))
 async def kill_switch(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if profile.role != UserRole.ADMIN:
-        await cb.answer(t("admin.admin_only", profile.settings.language.value),
-                        show_alert=True)
+        await ack(cb, t("admin.admin_only", profile.settings.language.value),
+                  show_alert=True)
         return
     venue = cb.data.split(":")[-1]
     ctx.admin.kill_switch(venue, True)
-    await cb.answer(t("admin.killed", profile.settings.language.value, venue=venue),
-                    show_alert=True)
+    await ack(cb, t("admin.killed", profile.settings.language.value, venue=venue),
+              show_alert=True)
 
 
 @router.callback_query(F.data == "admin:analytics")
 async def analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     mrr = await ctx.admin.mrr()
     metrics = ctx.analytics.engine_metrics()
     lang = profile.settings.language.value
@@ -106,15 +108,15 @@ async def analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) ->
         t("admin.rejections", lang, rejections=metrics["rejections"]),
     ])
     await cb.message.edit_text(text, reply_markup=back_home(lang, back="admin:menu"))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "admin:logs")
 async def logs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if profile.role != UserRole.ADMIN:  # logs are Admin-only, not Support (§16.7)
-        await cb.answer(t("error.unknown_command", profile.settings.language.value),
-                        show_alert=True)
+        await ack(cb, t("error.unknown_command", profile.settings.language.value),
+                  show_alert=True)
         return
+    await ack(cb)
     lang = profile.settings.language.value
     m = ctx.analytics.engine_metrics()
     text = "\n".join([
@@ -124,14 +126,14 @@ async def logs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None
         t("admin.outliers", lang, count=m.get("outliers", 0)),
     ])
     await cb.message.edit_text(text, reply_markup=back_home(lang, back="admin:menu"))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "admin:support")
 async def support_queue(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     lang = profile.settings.language.value
     tickets = await ctx.admin.open_tickets()
     b = InlineKeyboardBuilder()
@@ -146,20 +148,19 @@ async def support_queue(cb: CallbackQuery, ctx: BotContext, profile: UserProfile
     b.adjust(1)
     b.row(*back_home(lang, back="admin:menu").inline_keyboard[0])
     await cb.message.edit_text("\n".join(lines), reply_markup=b.as_markup())
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("admin:reply:"))
 async def reply_start(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     ticket_id = int(cb.data.split(":")[-1])
     await state.set_state(AdminStates.awaiting_reply)
     await state.update_data(ticket_id=ticket_id)
     await cb.message.answer(t("admin.reply_prompt", profile.settings.language.value,
                               id=ticket_id))
-    await cb.answer()
 
 
 @router.message(AdminStates.awaiting_reply, F.text)
@@ -188,11 +189,11 @@ async def reply_send(message: Message, ctx: BotContext, profile: UserProfile,
 @router.callback_query(F.data == "admin:users")
 async def users_prompt(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     await state.set_state(AdminStates.awaiting_user_lookup)
     await cb.message.answer(t("admin.lookup_prompt", profile.settings.language.value))
-    await cb.answer()
 
 
 @router.message(AdminStates.awaiting_user_lookup, F.text)
@@ -230,13 +231,13 @@ async def users_lookup(message: Message, ctx: BotContext, profile: UserProfile,
 @router.callback_query(F.data.startswith("admin:usr:"))
 async def user_action(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     _, _, action, target_id = cb.data.split(":")
     await state.set_state(AdminStates.awaiting_reason)
     await state.update_data(action=action, target=int(target_id))
     await cb.message.answer(t("admin.reason_prompt", profile.settings.language.value))
-    await cb.answer()
 
 
 @router.message(AdminStates.awaiting_reason, F.text)
@@ -261,8 +262,9 @@ async def apply_action(message: Message, ctx: BotContext, profile: UserProfile,
 @router.callback_query(F.data == "admin:subs")
 async def subs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     lang = profile.settings.language.value
     mrr = await ctx.admin.mrr()
     await cb.message.edit_text(
@@ -270,21 +272,20 @@ async def subs(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None
                    t("admin.subs_mrr", lang, amount=f"{mrr:.2f}"),
                    t("admin.subs_hint", lang)]),
         reply_markup=back_home(lang, back="admin:menu"))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "admin:broadcast")
 async def broadcast_start(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
+    await ack(cb)
     await state.set_state(AdminStates.awaiting_broadcast)
     await state.update_data(target_type="all", target_value=None)
     lang = profile.settings.language.value
     note = (t("admin.broadcast_support_note", lang)
             if profile.role == UserRole.SUPPORT else "")
     await cb.message.answer(t("admin.broadcast_prompt", lang, note=note))
-    await cb.answer()
 
 
 @router.message(AdminStates.awaiting_broadcast, F.text)
@@ -310,14 +311,16 @@ async def broadcast_preview(message: Message, ctx: BotContext, profile: UserProf
 async def broadcast_confirm(cb: CallbackQuery, ctx: BotContext, profile: UserProfile,
                             bot) -> None:
     if not _is_staff(profile):
-        await cb.answer()
+        await ack(cb)
         return
     job_id = int(cb.data.split(":")[-1])
     ready = await ctx.admin.confirm_broadcast(job_id, profile.telegram_user_id)
     lang = profile.settings.language.value
     if not ready:
-        await cb.answer(t("admin.broadcast_second_admin", lang), show_alert=True)
+        await ack(cb, t("admin.broadcast_second_admin", lang), show_alert=True)
         return
+    # Ack before the fan-out: sending to N users takes far longer than the answer window.
+    await ack(cb)
     recipients = await ctx.admin.recipients_for(job_id)
     sent = 0
     for uid in recipients:
@@ -327,4 +330,3 @@ async def broadcast_confirm(cb: CallbackQuery, ctx: BotContext, profile: UserPro
         except Exception:  # noqa: BLE001
             continue
     await cb.message.edit_text(t("admin.broadcast_sent", lang, count=sent))
-    await cb.answer()

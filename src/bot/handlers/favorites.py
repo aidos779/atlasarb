@@ -5,6 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import favorites_hub
@@ -21,8 +22,8 @@ async def _show_hub(event, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     kb = favorites_hub(lang)
     if isinstance(event, CallbackQuery):
+        await ack(event)
         await event.message.edit_text(t("favorites.title", lang), reply_markup=kb)
-        await event.answer()
     else:
         await event.answer(t("favorites.title", lang), reply_markup=kb)
 
@@ -45,8 +46,8 @@ async def menu_favorites(cb: CallbackQuery, profile: UserProfile) -> None:
 @router.callback_query(F.data.startswith("fav:") & ~F.data.startswith("fav:signal:"))
 async def list_favorites(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     kind = cb.data.split(":")[1]
+    await ack(cb)
     if kind not in _KIND_TITLE:
-        await cb.answer()
         return
     lang = profile.settings.language.value
     rows = await ctx.favorites.list(profile.telegram_user_id, kind)
@@ -57,4 +58,3 @@ async def list_favorites(cb: CallbackQuery, ctx: BotContext, profile: UserProfil
         lines = [f"{'🔒 ' if r.frozen else ''}{r.value}" for r in rows]
         body = f"{title}\n\n" + "\n".join(lines)
     await cb.message.edit_text(body, reply_markup=back_home(lang, back="menu:favorites"))
-    await cb.answer()

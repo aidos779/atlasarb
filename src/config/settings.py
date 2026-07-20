@@ -45,9 +45,10 @@ _EXTRA_FALLBACK_RPCS: dict[str, tuple[str, ...]] = {
     # eth_blockNumber without any API key on 2026-07-11. Public Ankr (rpc.ankr.com/eth)
     # is deliberately absent — it now answers "Unauthorized: you must be authenticated",
     # so it is retired at config time by _resolve_ankr unless ANKR_API_KEY is set.
+    # eth.merkle.io was removed 2026-07-19 for the same reason: it now requires
+    # authentication, so every probe burned a failover slot before being retired.
     "ethereum": (
         "https://ethereum.publicnode.com",     # PublicNode / Allnodes
-        "https://eth.merkle.io",               # Merkle
         "https://rpc.mevblocker.io",           # MevBlocker / CoW
         "https://eth-mainnet.public.blastapi.io",  # Bware / BlastAPI
         "https://eth.rpc.blxrbdn.com",         # bloXroute

@@ -159,7 +159,18 @@ class BaseDexAdapter(ExchangeAdapter):
         await self._limiter.acquire()
         started = time.perf_counter()
         try:
-            async with self._session.post(url, json=payload) as resp:
+            # Adaptive per-attempt deadline: a node whose *observed* EWMA latency sits at
+            # or above the base timeout is slow-but-alive, not dead — cutting it off at
+            # the base deadline recorded a false TIMEOUT on most of its completions and
+            # produced disable/recover churn. Grant it up to 2x its own EWMA, capped at
+            # 2x the base. Fast/unknown providers keep the base deadline unchanged, and
+            # the hedged fan-out (not this deadline) is what bounds call latency.
+            base = self._config.dex_rpc_timeout_sec
+            ewma = self._rpc_pool.ewma_latency_ms(url) / 1000.0
+            deadline = max(base, min(ewma * 2.0, base * 2.0)) if ewma > 0 else base
+            async with self._session.post(
+                    url, json=payload,
+                    timeout=aiohttp.ClientTimeout(total=deadline)) as resp:
                 if resp.status != 200:
                     # 401 (and 403 with an auth body) means the endpoint needs a key we
                     # don't have — a permanent failure to retire, not retry. 429 is

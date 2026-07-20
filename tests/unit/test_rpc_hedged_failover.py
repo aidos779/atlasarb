@@ -47,7 +47,7 @@ class _FakeSession:
     def __init__(self, handlers):
         self._handlers = handlers  # url -> () -> _Resp
 
-    def post(self, url, json=None):
+    def post(self, url, json=None, timeout=None):
         return self._handlers[url]()
 
 
@@ -65,6 +65,9 @@ class _StubPool:
 
     def record_failure(self, url, kind):
         self.failures.append((url, kind))
+
+    def ewma_latency_ms(self, url):
+        return 0.0  # unknown latency -> transport keeps the base deadline
 
     def snapshot(self):
         return []
@@ -114,3 +117,33 @@ def test_call_is_capped_to_max_providers_per_call():
     assert result is None
     # Only the first 6 (best-ranked) providers are attempted, bounding worst-case latency.
     assert len(a._rpc_pool.failures) == 6
+
+
+def test_pure_timeout_streak_trips_breaker_at_double_threshold():
+    """Timeouts on a public node are usually latency spikes, not dead endpoints — a
+    pure-timeout streak must survive fail_threshold strikes and only trip at 2x, while
+    any harder failure in the streak keeps the fast threshold (the anti-flapping fix)."""
+    from src.scanner.adapters.rpc_pool import RpcProviderPool
+
+    pool = RpcProviderPool(urls=["u"], fail_threshold=5, network="ethereum")
+    for _ in range(5):
+        pool.record_failure("u", RpcErrorKind.TIMEOUT)
+    assert pool.healthy_count() == (1, 1)          # still in rotation at base threshold
+    for _ in range(5):
+        pool.record_failure("u", RpcErrorKind.TIMEOUT)
+    assert pool.healthy_count() == (0, 1)          # tripped at 2x
+
+    # A hard block mixed into the streak keeps the fast threshold.
+    pool2 = RpcProviderPool(urls=["u"], fail_threshold=5, network="ethereum")
+    pool2.record_failure("u", RpcErrorKind.HTTP)
+    for _ in range(4):
+        pool2.record_failure("u", RpcErrorKind.TIMEOUT)
+    assert pool2.healthy_count() == (0, 1)         # tripped at base threshold
+
+    # A success fully resets the streak character.
+    pool3 = RpcProviderPool(urls=["u"], fail_threshold=5, network="ethereum")
+    pool3.record_failure("u", RpcErrorKind.HTTP)
+    pool3.record_success("u", latency_ms=100)
+    for _ in range(5):
+        pool3.record_failure("u", RpcErrorKind.TIMEOUT)
+    assert pool3.healthy_count() == (1, 1)         # pure-timeout streak again

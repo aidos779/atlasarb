@@ -5,6 +5,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.keyboards.inline import back_home
 from src.bot.keyboards.screens import support_menu
@@ -16,25 +17,25 @@ router = Router(name="support")
 
 @router.callback_query(F.data == "menu:support")
 async def menu_support(cb: CallbackQuery, profile: UserProfile) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     await cb.message.edit_text(t("support.title", lang), reply_markup=support_menu(lang))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "support:faq")
 async def faq(cb: CallbackQuery, profile: UserProfile) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     await cb.message.edit_text(t("support.faq_body", lang),
                                reply_markup=back_home(lang, back="menu:support"))
-    await cb.answer()
 
 
 @router.callback_query(F.data == "support:contact")
 async def contact(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     await state.set_state(SupportStates.awaiting_message)
     await cb.message.answer(t("support.prompt", lang))
-    await cb.answer()
 
 
 @router.message(SupportStates.awaiting_message, F.text)

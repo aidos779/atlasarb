@@ -55,6 +55,15 @@ class BreakerState(StrEnum):
 # get the full cooldown; a transient RPC error backs off more gently.
 _HARD_KINDS = frozenset({RpcErrorKind.HTTP, RpcErrorKind.RATE_LIMIT, RpcErrorKind.TIMEOUT})
 
+# Multiplier on ``fail_threshold`` for a streak made up purely of timeouts. A timeout on
+# a public node is very often a latency spike, not a dead endpoint (prod EWMA latencies
+# of 2-7s sit right at the 5s request deadline), and the hedged fan-out already shields
+# call latency from a slow node — so tripping the breaker as fast as for a hard 403/429
+# block bought nothing and produced the disabled→TIMEOUT→recovered flapping seen in
+# production. A definitive signal (any HTTP block / rate-limit / auth failure in the
+# streak) still trips at the base threshold.
+_TIMEOUT_STREAK_MULTIPLIER = 2
+
 
 @dataclass
 class _Provider:
@@ -64,6 +73,9 @@ class _Provider:
     latency_ms: float = 0.0     # EWMA of successful-call latency
     timeout_rate: float = 0.0   # EWMA of "was this failure a timeout?" in [0, 1]
     fail_streak: int = 0
+    # True once the current consecutive-failure streak contains any non-timeout failure —
+    # a pure-timeout streak trips the breaker later (see _TIMEOUT_STREAK_MULTIPLIER).
+    streak_has_nontimeout: bool = False
     disabled_until: float = 0.0
     cooldown: float = 0.0       # current cooldown length (grows on repeat failure)
     permanent: bool = False     # retired (e.g. unauthorized) — never re-probed
@@ -187,6 +199,12 @@ class RpcProviderPool:
         soonest = min(probes, key=lambda p: (p.disabled_until, p.tier))
         return [soonest.url]
 
+    def ewma_latency_ms(self, url: str) -> float:
+        """EWMA latency of one provider (0.0 if unknown) — lets the transport grant a
+        known-slow-but-alive node a deadline matched to how it actually responds."""
+        p = self._by_url(url)
+        return p.latency_ms if p is not None else 0.0
+
     def record_success(self, url: str, latency_ms: float = 0.0) -> None:
         p = self._by_url(url)
         if p is None:
@@ -198,6 +216,7 @@ class RpcProviderPool:
                             else p.latency_ms * 0.8 + latency_ms * 0.2)
         p.timeout_rate *= 0.8  # decay toward 0 on success
         p.fail_streak = 0
+        p.streak_has_nontimeout = False
         p.cooldown = 0.0
         p.disabled_until = 0.0
         p.permanent = False
@@ -218,6 +237,8 @@ class RpcProviderPool:
         p.score = max(0.0, p.score * 0.8)
         p.timeout_rate = p.timeout_rate * 0.8 + (0.2 if kind == RpcErrorKind.TIMEOUT else 0.0)
         p.fail_streak += 1
+        if kind != RpcErrorKind.TIMEOUT:
+            p.streak_has_nontimeout = True
         p.last_kind = kind
         p.last_failure_at = now
 
@@ -248,7 +269,13 @@ class RpcProviderPool:
                         detail="endpoint dead — retired for process lifetime")
             return
 
-        if p.fail_streak >= self.fail_threshold and p.disabled_until <= now:
+        # A pure-timeout streak is usually a latency spike on an otherwise-alive node
+        # (ranking already sinks it via timeout_rate + the slow-latency penalty, and
+        # hedging keeps calls fast) — require a longer streak before pulling it from
+        # rotation. Any harder evidence in the streak keeps the fast threshold.
+        threshold = (self.fail_threshold if p.streak_has_nontimeout
+                     else self.fail_threshold * _TIMEOUT_STREAK_MULTIPLIER)
+        if p.fail_streak >= threshold and p.disabled_until <= now:
             # Exponential cooldown growth, capped. Hard kinds (block/throttle/timeout)
             # start at the full base; a plain RPC error at half, so a momentarily
             # buggy node recovers faster than a genuinely blocked host.

@@ -8,6 +8,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.handlers.common import render_signal_list
 from src.bot.keyboards.screens import filters_panel, multiselect, numeric_editor
@@ -50,11 +51,11 @@ def _set_numeric(profile: UserProfile, field: str, value: Decimal) -> None:
 
 @router.callback_query(F.data == "filters:open")
 async def open_panel(cb: CallbackQuery, profile: UserProfile) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     ent = entitlements_for(profile.effective_tier)
     await cb.message.edit_text(t("filters.title", lang),
                                reply_markup=filters_panel(profile, ent, lang))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("filters:edit:"))
@@ -63,10 +64,11 @@ async def edit_filter(cb: CallbackQuery, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     ent = entitlements_for(profile.effective_tier)
     if not ent.filter_allowed(field):
-        await cb.answer(t("filters.upsell", lang, filter=filter_label(field, lang),
-                          tier=tier_label(_TIER_NAME.get(field, "basic"), lang)),
-                        show_alert=True)
+        await ack(cb, t("filters.upsell", lang, filter=filter_label(field, lang),
+                        tier=tier_label(_TIER_NAME.get(field, "basic"), lang)),
+                  show_alert=True)
         return
+    await ack(cb)
     if field in _NUMERIC:
         await cb.message.edit_text(
             t("filters.edit_prompt", lang, field=filter_label(field, lang)),
@@ -76,7 +78,6 @@ async def edit_filter(cb: CallbackQuery, profile: UserProfile) -> None:
         await cb.message.edit_text(
             t("filters.select_prompt", lang, field=filter_label(field, lang)),
             reply_markup=multiselect(field, options, selected, lang))
-    await cb.answer()
 
 
 def _multiselect_options(field: str, profile: UserProfile, ctx_engine):
@@ -97,24 +98,24 @@ def _multiselect_options(field: str, profile: UserProfile, ctx_engine):
 @router.callback_query(F.data.startswith("filters:step:"))
 async def step_filter(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     _, _, field, direction = cb.data.split(":")
+    await ack(cb)
     step = _STEP[field] * (Decimal(1) if direction == "+" else Decimal(-1))
     _set_numeric(profile, field, _get_numeric(profile, field) + step)
     await ctx.users.save(profile)
     lang = profile.settings.language.value
     await cb.message.edit_reply_markup(
         reply_markup=numeric_editor(field, str(_get_numeric(profile, field)), lang))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("filters:type:"))
 async def type_filter(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
     field = cb.data.split(":")[-1]
+    await ack(cb)
     await state.set_state(FilterStates.awaiting_value)
     await state.update_data(field=field)
     lang = profile.settings.language.value
     await cb.message.answer(
         t("filters.type_prompt", lang, field=filter_label(field, lang)))
-    await cb.answer()
 
 
 @router.message(FilterStates.awaiting_value, F.text)
@@ -152,25 +153,26 @@ async def toggle_multiselect(cb: CallbackQuery, ctx: BotContext, profile: UserPr
         ent = entitlements_for(profile.effective_tier)
         newset = _toggle(f.exchanges, value)
         if ent.tier.value == "free" and len(newset) > 1:
-            await cb.answer(t("filters.upsell", lang,
-                              filter=t("filters.multiple_exchanges", lang),
-                              tier=tier_label("basic", lang)), show_alert=True)
+            await ack(cb, t("filters.upsell", lang,
+                            filter=t("filters.multiple_exchanges", lang),
+                            tier=tier_label("basic", lang)), show_alert=True)
             return
         f.exchanges = newset
     else:  # coin
         ent = entitlements_for(profile.effective_tier)
         newset = _toggle(f.coins, value)
         if ent.tier.value == "free" and len(newset) > 3:
-            await cb.answer(t("filters.upsell", lang,
-                              filter=t("filters.more_coins", lang),
-                              tier=tier_label("basic", lang)), show_alert=True)
+            await ack(cb, t("filters.upsell", lang,
+                            filter=t("filters.more_coins", lang),
+                            tier=tier_label("basic", lang)), show_alert=True)
             return
         f.coins = newset
+    # All gating above is in-memory — ack now, before the DB save and edit round trip.
+    await ack(cb)
     await ctx.users.save(profile)
     options, selected = _multiselect_options(field, profile, None)
     await cb.message.edit_reply_markup(
         reply_markup=multiselect(field, options, selected, lang))
-    await cb.answer()
 
 
 def _toggle(current: frozenset, value: str) -> frozenset:
@@ -184,17 +186,17 @@ def _toggle(current: frozenset, value: str) -> frozenset:
 
 @router.callback_query(F.data == "filters:save")
 async def save_filters(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb, t("filters.saved", profile.settings.language.value))
     await ctx.users.save(profile)
-    await cb.answer(t("filters.saved", profile.settings.language.value))
-    await render_signal_list(cb, ctx, profile)
+    await render_signal_list(cb, ctx, profile, need_ack=False)
 
 
 @router.callback_query(F.data == "filters:reset")
 async def reset_filters(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
     profile.filter = UserFilter()
     await ctx.users.save(profile)
     lang = profile.settings.language.value
     ent = entitlements_for(profile.effective_tier)
     await cb.message.edit_text(t("filters.reset", lang),
                                reply_markup=filters_panel(profile, ent, lang))
-    await cb.answer()

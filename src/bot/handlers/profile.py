@@ -5,6 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.money import format_datetime
 from src.bot.keyboards.inline import back_home, upsell_keyboard
@@ -37,14 +38,15 @@ async def _render_profile(event, profile: UserProfile) -> None:
     ]
     kb = back_home(lang)
     if isinstance(event, CallbackQuery):
+        await ack(event)
         await event.message.edit_text("\n".join(lines), reply_markup=kb)
-        await event.answer()
     else:
         await event.answer("\n".join(lines), reply_markup=kb)
 
 
 @router.callback_query(F.data == "menu:analytics")
 async def menu_analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
     lang = profile.settings.language.value
     summary = ctx.analytics.today()
     none = t("analytics.none", lang)
@@ -59,7 +61,6 @@ async def menu_analytics(cb: CallbackQuery, ctx: BotContext, profile: UserProfil
         f"{t('analytics.top_exchanges', lang)}: {exch}",
     ])
     await cb.message.edit_text(text, reply_markup=back_home(lang))
-    await cb.answer()
 
 
 @router.message(Command("history"))

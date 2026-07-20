@@ -7,6 +7,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.handlers.common import render_main_menu, render_signal_list
 from src.bot.keyboards.inline import (
@@ -56,26 +57,27 @@ async def _resume_onboarding(event: Message, profile: UserProfile) -> None:
 @router.callback_query(F.data.startswith("ob:lang:"))
 async def onboarding_language(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     code = cb.data.split(":")[-1]
+    await ack(cb)
     await ctx.users.set_language(profile, Language(code))
     lang = code
     await cb.message.edit_text(t("onboarding.timezone", lang),
                                reply_markup=timezone_keyboard("ob:tz"))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("ob:tz:"))
 async def onboarding_timezone(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     tz = cb.data.split(":", 2)[-1]
+    await ack(cb)
     await ctx.users.set_timezone(profile, tz)
     lang = profile.settings.language.value
     await cb.message.edit_text(t("onboarding.currency", lang),
                                reply_markup=currency_keyboard("ob:cur"))
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("ob:cur:"))
 async def onboarding_currency(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
     cur = cb.data.split(":")[-1]
+    await ack(cb)
     await ctx.users.set_currency(profile, Currency(cur))
     lang = profile.settings.language.value
     await cb.message.answer(t("onboarding.done", lang),
@@ -87,8 +89,7 @@ async def onboarding_currency(cb: CallbackQuery, ctx: BotContext, profile: UserP
         await ctx.users.set_pending_deeplink(fresh, None)
         await _apply_deeplink(cb.message, ctx, fresh, payload)
     else:
-        await render_main_menu(cb, fresh or profile)
-    await cb.answer()
+        await render_main_menu(cb, fresh or profile, need_ack=False)
 
 
 async def _apply_deeplink(event: Message, ctx: BotContext, profile: UserProfile,
@@ -156,4 +157,4 @@ async def menu_signals(cb: CallbackQuery, ctx: BotContext, profile: UserProfile)
 
 @router.callback_query(F.data == "noop")
 async def noop(cb: CallbackQuery) -> None:
-    await cb.answer()
+    await ack(cb)

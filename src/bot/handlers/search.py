@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.handlers.common import SESSIONS, render_signal_list
 from src.bot.states.states import SearchStates
@@ -29,9 +30,9 @@ async def cmd_search(message: Message, command: CommandObject, ctx: BotContext,
 
 @router.callback_query(F.data == "search:open")
 async def search_open(cb: CallbackQuery, profile: UserProfile, state: FSMContext) -> None:
+    await ack(cb)
     await state.set_state(SearchStates.awaiting_query)
     await cb.message.answer(t("search.prompt", profile.settings.language.value))
-    await cb.answer()
 
 
 @router.message(SearchStates.awaiting_query, F.text)

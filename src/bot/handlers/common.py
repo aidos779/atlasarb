@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
+from src.bot.callbacks import ack
 from src.bot.context import BotContext
 from src.bot.formatters.signal import format_card
 from src.bot.keyboards.inline import main_menu, signal_list_controls
@@ -64,15 +65,21 @@ def effective_filter(profile: UserProfile, session: UiSession) -> UserFilter:
     )
 
 
-async def render_main_menu(event: Message | CallbackQuery, profile: UserProfile) -> None:
+async def render_main_menu(event: Message | CallbackQuery, profile: UserProfile,
+                           need_ack: bool = True) -> None:
     lang = profile.settings.language.value
     text = t("menu.title", lang)
     kb = main_menu(lang)
-    await _render(event, text, kb)
+    await _render(event, text, kb, need_ack=need_ack)
 
 
 async def render_signal_list(event: Message | CallbackQuery, ctx: BotContext,
-                             profile: UserProfile) -> None:
+                             profile: UserProfile, need_ack: bool = True) -> None:
+    # Ack before the expensive part (registry query, per-card FX formatting, favorites
+    # read, then the edit round trip) — the spinner must never wait on any of it.
+    if need_ack and isinstance(event, CallbackQuery):
+        await ack(event)
+        need_ack = False
     lang = profile.settings.language.value
     session = SESSIONS.get(profile.telegram_user_id)
     ent = entitlements_for(profile.effective_tier)
@@ -87,7 +94,7 @@ async def render_signal_list(event: Message | CallbackQuery, ctx: BotContext,
         signals = signals[: ent.signals_per_refresh]
 
     if not signals:
-        await _render(event, t("signals.empty", lang), main_menu(lang))
+        await _render(event, t("signals.empty", lang), main_menu(lang), need_ack=need_ack)
         return
 
     total_pages = max(1, (len(signals) + _PAGE_SIZE - 1) // _PAGE_SIZE)
@@ -108,16 +115,22 @@ async def render_signal_list(event: Message | CallbackQuery, ctx: BotContext,
         header = t("signals.free_notice", lang) + "\n\n" + header
     text = header + "\n\n" + "\n\n".join(cards_text)
     kb = signal_list_controls(lang, session.sort, session.page, total_pages, cards_meta)
-    await _render(event, text, kb)
+    await _render(event, text, kb, need_ack=need_ack)
 
 
-async def _render(event: Message | CallbackQuery, text: str, kb) -> None:
+async def _render(event: Message | CallbackQuery, text: str, kb,
+                  need_ack: bool = True) -> None:
+    """need_ack=False means the caller already answered this callback query (e.g. with
+    a toast) — answering again is guaranteed QUERY_ID_INVALID noise."""
     if isinstance(event, CallbackQuery):
+        # Ack BEFORE the edit: the edit is a full API round trip, and if it raises, the
+        # old order left the query unanswered (spinner until Telegram's timeout).
+        if need_ack:
+            await ack(event)
         try:
             await event.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         except TelegramBadRequest:
             await event.message.answer(text, reply_markup=kb, disable_web_page_preview=True)
-        await event.answer()
     else:
         await event.answer(text, reply_markup=kb, disable_web_page_preview=True)
 

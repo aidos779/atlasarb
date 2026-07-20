@@ -49,6 +49,13 @@ class MarketStateCache:
         )
         self._warmup: dict[tuple[str, str], int] = defaultdict(int)
         self._tracked: set[tuple[str, str]] = set()               # (venue, pair)
+        # pair -> venues holding a price or book entry for it. Kept in lockstep with
+        # _prices/_books (written in upsert_price/upsert_book, removed only in untrack —
+        # the sole removal point for either dict) so venues_for_pair() and the cross-venue
+        # outlier check are O(venues) instead of scanning the whole cache. That scan made
+        # detection quadratic in universe size (~40 s full scans at ~8k pairs) and ran on
+        # every WS price write via _cross_venue_suspect.
+        self._venues_by_pair: dict[str, set[str]] = defaultdict(set)
         self._listeners: list[CacheEvent] = []
         self._suspect: dict[tuple[str, str], bool] = {}           # cross-venue flag
         self.rejected_prices = 0
@@ -77,6 +84,13 @@ class MarketStateCache:
         self._books.pop(key, None)
         self._price_windows.pop(key, None)
         self._warmup.pop(key, None)
+        # Both backing entries are gone — drop the venue from the pair index, and the
+        # pair's set entirely once empty so the index never outgrows the live cache.
+        venues = self._venues_by_pair.get(pair)
+        if venues is not None:
+            venues.discard(venue)
+            if not venues:
+                del self._venues_by_pair[pair]
 
     def is_tracked(self, venue: str, pair: str) -> bool:
         return (venue, pair) in self._tracked
@@ -106,6 +120,7 @@ class MarketStateCache:
             self._suspect[key] = False
         window.append(quote.mid)
         self._prices[key] = quote
+        self._venues_by_pair[quote.symbol.pair].add(quote.venue)
         if self._warmup[key] < self._config.warmup_samples:
             self._warmup[key] += 1
         self._emit(quote.symbol.base_asset, quote.symbol.quote_asset, quote.venue)
@@ -119,6 +134,7 @@ class MarketStateCache:
             log.debug("book_rejected", venue=book.venue, pair=book.symbol.pair)
             return
         self._books[key] = book
+        self._venues_by_pair[book.symbol.pair].add(book.venue)
         # DEX venues publish pool state as books only (no PriceQuote stream), so the
         # §3.1 warm-up counter must advance on pool reads too — otherwise DEX pairs
         # never warm up and every CEX-DEX / DEX-DEX candidate dies NOT_WARMED_UP.
@@ -157,10 +173,16 @@ class MarketStateCache:
     def _cross_venue_suspect(self, quote: PriceQuote) -> bool:
         """§4.6 — flag a single-venue reading deviating >X% from cross-venue median."""
         pair = quote.symbol.pair
-        others = [
-            q.mid for (v, p), q in self._prices.items()
-            if p == pair and v != quote.venue and q.mid > 0
-        ]
+        # Via the pair index (O(venues)), not a full _prices scan — this runs on every
+        # WS price write. Book-only venues have no _prices entry and drop out, exactly
+        # as they did under the old scan.
+        others = []
+        for v in self._venues_by_pair.get(pair, ()):
+            if v == quote.venue:
+                continue
+            q = self._prices.get((v, pair))
+            if q is not None and q.mid > 0:
+                others.append(q.mid)
         if len(others) < 2:
             return False
         med = mathx.robust_median(others)
@@ -199,10 +221,10 @@ class MarketStateCache:
     def venues_for_pair(self, pair: str) -> list[str]:
         # Books too, not just quotes: DEX venues carry pool state as books only —
         # a price-only view hid every DEX venue from the detectors (no CEX-DEX,
-        # DEX-DEX or cross-chain candidates could ever form).
-        venues = {v for (v, p) in self._prices if p == pair}
-        venues |= {v for (v, p) in self._books if p == pair}
-        return list(venues)
+        # DEX-DEX or cross-chain candidates could ever form). Served from the
+        # maintained pair index — the previous full scan of _prices+_books made this
+        # O(cache size) per call, ~6 calls per symbol, i.e. quadratic per full scan.
+        return list(self._venues_by_pair.get(pair, ()))
 
     def tracked_pairs(self) -> set[str]:
         return {p for (_, p) in self._tracked}

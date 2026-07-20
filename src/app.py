@@ -28,6 +28,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import ExceptionTypeFilter
 from aiogram.types import BotCommand, ErrorEvent
 
+from src.bot.callbacks import is_expired_callback_error
 from src.bot.context import BotContext
 from src.bot.handlers import register_handlers
 from src.bot.middlewares.context import ContextMiddleware
@@ -84,14 +85,10 @@ _COMMANDS = [
 # or the handler was briefly slow) raise TelegramBadRequest "query is too old…". This is a
 # benign timing condition, not a bug — swallow it as a structured warning instead of
 # letting the raw traceback flood the logs. Any other TelegramBadRequest is re-raised so
-# genuine API misuse still surfaces.
-_CALLBACK_EXPIRED_MARKERS = ("query is too old", "query id is invalid",
-                             "query is invalid")
-
-
+# genuine API misuse still surfaces. Handlers ack through src.bot.callbacks.ack (which
+# absorbs these in-place); this dispatcher-level net covers any answer path outside it.
 async def _on_telegram_bad_request(event: ErrorEvent) -> bool:
-    msg = str(event.exception).lower()
-    if any(marker in msg for marker in _CALLBACK_EXPIRED_MARKERS):
+    if is_expired_callback_error(event.exception):
         log.warning("callback_query_expired", error=str(event.exception))
         return True  # handled — no traceback
     raise event.exception  # not ours — let aiogram log it as before
@@ -219,8 +216,14 @@ class Application:
         ctx_mw = ContextMiddleware(self.ctx)
         throttle = ThrottleMiddleware()
         for observer in (self.dp.message, self.dp.callback_query):
-            observer.middleware(ctx_mw)
+            # Throttle FIRST (registration order is execution order): loading the profile
+            # costs 8 SQL round trips, and running it ahead of the limiter spent all of
+            # them on updates the limiter was about to drop — so a flood hit Postgres at
+            # full rate. Shedding first makes a throttled update cost zero queries.
+            # ThrottleMiddleware needs only `event_from_user`, which aiogram's own
+            # dispatcher-level UserContextMiddleware supplies ahead of both of these.
             observer.middleware(throttle)
+            observer.middleware(ctx_mw)
         register_handlers(self.dp)
         self.dp.errors.register(_on_telegram_bad_request,
                                 ExceptionTypeFilter(TelegramBadRequest))
