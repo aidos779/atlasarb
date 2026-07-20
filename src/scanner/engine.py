@@ -11,7 +11,7 @@ import asyncio
 import time
 from decimal import Decimal
 
-from src.config import LogThrottle, describe_exc, get_logger
+from src.config import LogThrottle, debug_enabled, describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
 from src.domain.enums import ExchangeStatus, ExpiryReason
 from src.domain.ports import (
@@ -199,6 +199,9 @@ class ScanningEngine:
         started = time.perf_counter()
         self._metrics.record_opportunity_checked()
         ctx = self._detection_context()
+        # Open a detection tick so the five detectors share one cache scan per pair
+        # instead of each re-walking the venues (see DetectionContext.begin_tick).
+        ctx.begin_tick()
         online_venues = [v for v in self._cache.venues_for_pair(f"{base}/{quote}")
                          if self._health.is_online(v)]
         if len(online_venues) >= 2:
@@ -230,9 +233,12 @@ class ScanningEngine:
         for cand in candidates:
             self._metrics.record_candidate()
             self._detector_stats.record_candidate(cand.arb_type.value)
-            log.debug("candidate_created", arb_type=cand.arb_type.value,
-                      coin=base, buy=cand.buy_leg.venue, sell=cand.sell_leg.venue,
-                      gross_pct=float(round(cand.gross_spread_pct, 4)))
+            # Gated: the gross_pct argument is a Decimal round + float conversion that
+            # would otherwise run for every candidate and be discarded at INFO.
+            if debug_enabled():
+                log.debug("candidate_created", arb_type=cand.arb_type.value,
+                          coin=base, buy=cand.buy_leg.venue, sell=cand.sell_leg.venue,
+                          gross_pct=float(round(cand.gross_spread_pct, 4)))
             await self._handle_candidate(cand)
 
     async def _handle_candidate(self, cand: Candidate) -> None:

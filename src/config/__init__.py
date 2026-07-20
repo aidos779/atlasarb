@@ -1,6 +1,7 @@
 from src.config.logging import (
     LogThrottle,
     configure_logging,
+    debug_enabled,
     describe_exc,
     get_logger,
     install_global_exception_hooks,
@@ -22,6 +23,7 @@ __all__ = [
     "ScannerConfig",
     "Settings",
     "configure_logging",
+    "debug_enabled",
     "describe_exc",
     "get_logger",
     "get_settings",

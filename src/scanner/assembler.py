@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
-from src.config import get_logger
+from src.config import debug_enabled, get_logger
 from src.config.scanner_config import ScannerConfig
 from src.domain.enums import ArbitrageType, RejectReason
 from src.domain.market import OrderBook
@@ -174,8 +174,13 @@ class SignalAssembler:
             if gross - floor < Decimal(str(self._config.min_roi_pct)):
                 return AssemblyResult(None, RejectReason.BELOW_MIN_PROFIT)
 
-        buy_book = self._book_for(cand.buy_leg.venue, cand)
-        sell_book = self._book_for(cand.sell_leg.venue, cand)
+        # One pair string for the whole assembly. It was being rebuilt ~7x per candidate
+        # (both book lookups, the warm-up check, the risk inputs, the confidence inputs
+        # and twice in _build_signal) — each an f-string allocation with identical output.
+        pair = f"{cand.base_asset}/{cand.quote_asset}"
+
+        buy_book = self._cache.get_book(cand.buy_leg.venue, pair)
+        sell_book = self._cache.get_book(cand.sell_leg.venue, pair)
         if buy_book is None or sell_book is None:
             return AssemblyResult(None, RejectReason.STALE_DATA)
 
@@ -199,33 +204,39 @@ class SignalAssembler:
             buy_leg, sell_leg, cand.buy_leg.venue_type, cand.sell_leg.venue_type, reference
         )
 
-        warmed = self._warmed(cand)
+        warmed = (self._cache.is_warmed_up(cand.buy_leg.venue, pair)
+                  and self._cache.is_warmed_up(cand.sell_leg.venue, pair))
+        # Computed once and reused by the risk inputs, the confidence inputs and the
+        # signal: price_window() materializes a new list from the rolling deque on every
+        # call, and this was calling it three times with identical arguments.
+        price_window_len = len(self._cache.price_window(cand.buy_leg.venue, pair))
+        # Also stable for this candidate; it drove three separate calls below.
+        floor_venue_type = self._floor_venue_type(cand)
+
         risk = classify_risk(RiskInputs(
             arb_type=cand.arb_type, liquidity_usd=liquidity_usd,
             liquidity_floor=Decimal(str(self._config.min_liquidity_usd(
-                self._floor_venue_type(cand)))),
+                floor_venue_type))),
             cross_network_transfer=cand.arb_type in (
                 ArbitrageType.CROSS_CHAIN, ArbitrageType.CEX_DEX),
             bridge_time_sec=cand.bridge_time_sec, atomic_execution=cand.atomic_execution,
-            price_source_count=len(self._cache.price_window(
-                cand.buy_leg.venue, f"{cand.base_asset}/{cand.quote_asset}")),
+            price_source_count=price_window_len,
         ))
 
         conf = self._confidence.score(self._confidence_inputs(
-            cand, buy_book, sell_book, liq_score, breakdown, warmed))
+            cand, buy_book, sell_book, liq_score, breakdown, warmed, pair,
+            price_window_len))
 
-        rank_score = self._ranker.composite_score(RankInputs(
+        # One RankInputs, used for both the score and the tier. The two calls were
+        # building byte-identical instances; RankInputs is read-only to both.
+        rank_inputs = RankInputs(
             net_profit_usd=breakdown.net_profit_usd, roi_pct=breakdown.roi_pct,
             profit_reference_usd=reference, liquidity_score=liq_score,
             confidence_score=Decimal(conf), risk=risk, arb_type=cand.arb_type,
             bridge_time_sec=cand.bridge_time_sec, warmed_up=warmed,
-        ))
-        tier = self._ranker.assign_tier(rank_score, RankInputs(
-            net_profit_usd=breakdown.net_profit_usd, roi_pct=breakdown.roi_pct,
-            profit_reference_usd=reference, liquidity_score=liq_score,
-            confidence_score=Decimal(conf), risk=risk, arb_type=cand.arb_type,
-            bridge_time_sec=cand.bridge_time_sec, warmed_up=warmed,
-        ))
+        )
+        rank_score = self._ranker.composite_score(rank_inputs)
+        tier = self._ranker.assign_tier(rank_score, rank_inputs)
 
         vctx = ValidationContext(
             breakdown=breakdown, sizing=sizing, liquidity_usd=liquidity_usd,
@@ -239,9 +250,9 @@ class SignalAssembler:
             # opportunities as STALE_DATA.
             max_allowed_staleness_sec=(
                 self._config.max_age_dex_price_sec
-                if self._floor_venue_type(cand) == "DEX"
+                if floor_venue_type == "DEX"
                 else self._config.max_age_orderbook_cex_sec),
-            venue_type_for_floor=self._floor_venue_type(cand),
+            venue_type_for_floor=floor_venue_type,
             token_verified=True,  # detector already gated DEX tokens
             warmed_up=warmed, gas_fee_usd=breakdown.gas_fees_usd,
             gross_profit_usd=breakdown.gross_profit_usd,
@@ -252,11 +263,16 @@ class SignalAssembler:
         )
         verdict = SignalValidator(self._config).validate(vctx)
         if not verdict.ok:
-            self._log_rejection(cand, breakdown, sizing, verdict.reason)
+            # Gated: _log_rejection runs seven Decimal divisions plus rounds/float
+            # conversions to build its fields. Rejections are the common case, so at
+            # INFO that was per-candidate arithmetic whose only consumer was a
+            # suppressed log record.
+            if debug_enabled():
+                self._log_rejection(cand, breakdown, sizing, verdict.reason)
             return AssemblyResult(None, verdict.reason)
 
         signal = self._build_signal(cand, breakdown, sizing, liquidity_usd, risk, conf,
-                                    tier, rank_score, warmed)
+                                    tier, rank_score, warmed, pair, price_window_len)
         return AssemblyResult(signal, None)
 
     # ── funding path (§7.4 / §8.10) ──
@@ -384,16 +400,8 @@ class SignalAssembler:
     def _floor_venue_type(self, cand: Candidate) -> str:
         return "DEX" if "DEX" in (cand.buy_leg.venue_type, cand.sell_leg.venue_type) else "CEX"
 
-    def _book_for(self, venue: str, cand: Candidate) -> OrderBook | None:
-        return self._cache.get_book(venue, f"{cand.base_asset}/{cand.quote_asset}")
-
     def _leg(self, book: OrderBook, venue_type: str, side: str) -> LiquidityLeg:
         return DexPoolLeg(book, side) if venue_type == "DEX" else CexBookLeg(book, side)
-
-    def _warmed(self, cand: Candidate) -> bool:
-        pair = f"{cand.base_asset}/{cand.quote_asset}"
-        return (self._cache.is_warmed_up(cand.buy_leg.venue, pair)
-                and self._cache.is_warmed_up(cand.sell_leg.venue, pair))
 
     @staticmethod
     def _leg_taker_fee(adapter: ExchangeAdapter | None, symbol, venue_type: str) -> Decimal | None:
@@ -461,16 +469,14 @@ class SignalAssembler:
         return total
 
     def _confidence_inputs(self, cand, buy_book, sell_book, liq_score, breakdown,
-                           warmed) -> ConfidenceInputs:
+                           warmed, pair: str, price_window_len: int) -> ConfidenceInputs:
         max_age = self._config.max_age_orderbook_cex_sec
         fresh = min(
             Decimal(1) - Decimal(str(min(buy_book.staleness(), max_age))) / Decimal(str(max_age)),
             Decimal(1) - Decimal(str(min(sell_book.staleness(), max_age))) / Decimal(str(max_age)),
         ) * Decimal(100)
-        pair = f"{cand.base_asset}/{cand.quote_asset}"
-        window = self._cache.price_window(cand.buy_leg.venue, pair)
         stability = min(Decimal(100),
-                        Decimal(len(window)) / Decimal(self._config.outlier_window_ticks)
+                        Decimal(price_window_len) / Decimal(self._config.outlier_window_ticks)
                         * Decimal(100))
         health = min(self._health.health_factor(cand.buy_leg.venue),
                      self._health.health_factor(cand.sell_leg.venue))
@@ -488,15 +494,20 @@ class SignalAssembler:
         )
 
     def _build_signal(self, cand, breakdown, sizing, liquidity_usd, risk, conf, tier,
-                      score, warmed) -> Signal:
+                      score, warmed, pair: str | None = None,
+                      price_window_len: int | None = None) -> Signal:
         now = time.time()
+        if pair is None:
+            pair = f"{cand.base_asset}/{cand.quote_asset}"
+        if price_window_len is None:
+            price_window_len = len(self._cache.price_window(cand.buy_leg.venue, pair))
         return Signal(
             # Deterministic route identity (§13.1): the same opportunity always gets the
             # same id, so updates and post-expiry re-appearances reuse it instead of
             # minting a fresh uuid each time.
             id=cand.route_id(),
             arb_type=cand.arb_type, coin=cand.base_asset,
-            trading_pair=f"{cand.base_asset}/{cand.quote_asset}", network=cand.network,
+            trading_pair=pair, network=cand.network,
             buy_exchange=cand.buy_leg.venue, sell_exchange=cand.sell_leg.venue,
             buy_price=cand.buy_leg.price, sell_price=cand.sell_leg.price,
             buy_venue_type=cand.buy_leg.venue_type, sell_venue_type=cand.sell_leg.venue_type,
@@ -512,6 +523,5 @@ class SignalAssembler:
             timestamp=now, last_updated=now, bridge_name=cand.bridge_name,
             bridge_time_sec=cand.bridge_time_sec, atomic_execution=cand.atomic_execution,
             warmed_up=warmed,
-            price_source_count=len(self._cache.price_window(
-                cand.buy_leg.venue, f"{cand.base_asset}/{cand.quote_asset}")),
+            price_source_count=price_window_len,
         )

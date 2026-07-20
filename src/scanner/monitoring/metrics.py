@@ -33,6 +33,12 @@ class Metrics:
     # Per venue-pair funnel (§17): "a↔b" -> checked/candidates/rejected_*/signals.
     venue_pair_stats: dict[str, dict[str, int]] = field(
         default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+    # Hot-path memos for the venue-pair funnel (see _pair_key / record_pair_checked).
+    # venue_pair_stats entries are stable defaultdict objects that are only ever read
+    # (venue_pair_snapshot copies, never clears), so caching references into them is safe.
+    _pair_key_cache: dict[tuple[str, str], str] = field(default_factory=dict)
+    _pair_checked_cache: dict[tuple[str, ...], list[dict[str, int]]] = field(
+        default_factory=dict)
 
     def record_detection(self, duration_ms: float) -> None:
         self.detection_durations_ms.append(duration_ms)
@@ -79,15 +85,37 @@ class Metrics:
         return buckets
 
     # ── per venue-pair funnel ──
-    @staticmethod
-    def _pair_key(venue_a: str, venue_b: str) -> str:
-        return "↔".join(sorted((venue_a, venue_b)))
+    def _pair_key(self, venue_a: str, venue_b: str) -> str:
+        """Order-independent "a↔b" key, memoized.
+
+        The venue set is a small fixed roster, so the sorted() + str.join() this used to
+        run per call produced the same handful of strings over and over — once per
+        venue-combination per symbol, i.e. O(venues²) allocations on every detection
+        tick. Look the key up instead and build it only the first time a pair is seen.
+        """
+        memo = self._pair_key_cache
+        key = (venue_a, venue_b)
+        cached = memo.get(key)
+        if cached is None:
+            cached = "↔".join(sorted(key))
+            memo[key] = cached
+        return cached
 
     def record_pair_checked(self, venues: list[str]) -> None:
         """One detection pass looked at every 2-combination of these online venues."""
-        for i in range(len(venues)):
-            for j in range(i + 1, len(venues)):
-                self.venue_pair_stats[self._pair_key(venues[i], venues[j])]["checked"] += 1
+        # The online-venue list is near-identical across symbols, so memoize the whole
+        # expanded combination list per roster: the O(venues²) pair walk then runs once
+        # per distinct roster rather than once per symbol.
+        roster = tuple(venues)
+        counters = self._pair_checked_cache.get(roster)
+        if counters is None:
+            stats = self.venue_pair_stats
+            counters = [stats[self._pair_key(venues[i], venues[j])]
+                        for i in range(len(venues))
+                        for j in range(i + 1, len(venues))]
+            self._pair_checked_cache[roster] = counters
+        for counter in counters:
+            counter["checked"] += 1
 
     def record_pair_candidate(self, buy_venue: str, sell_venue: str) -> None:
         self.venue_pair_stats[self._pair_key(buy_venue, sell_venue)]["candidates"] += 1

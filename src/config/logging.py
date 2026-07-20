@@ -13,9 +13,30 @@ import time
 
 import structlog
 
+# Whether DEBUG records are actually emitted. structlog's filtering bound logger makes
+# ``log.debug(...)`` a no-op below its level, but Python still evaluates every keyword
+# argument at the call site first — and on the hot path those arguments are Decimal
+# divisions, rounds and float() conversions whose results are then thrown away. Hot-path
+# callers gate on ``debug_enabled()`` so that work is skipped entirely.
+#
+# Defaults to True: an unconfigured structlog emits every level, so callers that gate on
+# this behave exactly as they did before configure_logging() ran (e.g. in tests).
+_debug_enabled = True
+
+
+def debug_enabled() -> bool:
+    """True when DEBUG records are actually emitted.
+
+    Only for guarding *expensive* debug-argument construction on the hot path. Cheap
+    ``log.debug()`` calls need no guard — the filtering logger already drops them.
+    """
+    return _debug_enabled
+
 
 def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
+    global _debug_enabled
     log_level = getattr(logging, level.upper(), logging.INFO)
+    _debug_enabled = log_level <= logging.DEBUG
 
     logging.basicConfig(
         format="%(message)s",

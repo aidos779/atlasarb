@@ -40,9 +40,35 @@ class DetectionContext:
     # Base assets whose ticker collides with a different token across venues — CEX↔CEX
     # detection is skipped for them (identity-level guard). From ScannerConfig.
     ambiguous_tickers: frozenset[str] = frozenset()
+    # ── per-tick scan memo (see begin_tick) ──
+    _memo_active: bool = False
+    _memo_cex: dict[str, list[tuple[str, object]]] = field(default_factory=dict)
+    _memo_dex: dict[str, list[tuple[str, object]]] = field(default_factory=dict)
+
+    def begin_tick(self) -> None:
+        """Open a new detection tick, invalidating the scan memo.
+
+        The five detectors run back-to-back for one symbol with no await between them
+        (see ScanningEngine._process_symbol), so the cache cannot change mid-tick and
+        the two scan helpers below are guaranteed to return the same result for the
+        same pair within a tick. They were being recomputed 2x (CEX) and 3x (DEX) per
+        symbol, each recomputation re-walking every venue with a freshness-checked
+        get_price/get_book — the single largest cost in the detection path.
+
+        Memoization is only active between begin_tick() calls: a context that never
+        gets one (a detector driven directly, as in the unit tests) recomputes exactly
+        as before, so the memo can never serve a stale scan to an un-ticked caller.
+        """
+        self._memo_active = True
+        self._memo_cex.clear()
+        self._memo_dex.clear()
 
     def online_cex_prices(self, pair: str) -> list[tuple[str, object]]:
-        out = []
+        if self._memo_active:
+            hit = self._memo_cex.get(pair)
+            if hit is not None:
+                return hit
+        out: list[tuple[str, object]] = []
         for venue in self.cache.venues_for_pair(pair):
             info = self.venues.get(venue)
             if not info or info.venue_type != VenueType.CEX:
@@ -53,10 +79,16 @@ class DetectionContext:
             book = self.cache.get_book(venue, pair)
             if quote and book:
                 out.append((venue, quote))
+        if self._memo_active:
+            self._memo_cex[pair] = out
         return out
 
     def online_dex_books(self, pair: str) -> list[tuple[str, object]]:
-        out = []
+        if self._memo_active:
+            hit = self._memo_dex.get(pair)
+            if hit is not None:
+                return hit
+        out: list[tuple[str, object]] = []
         for venue in self.cache.venues_for_pair(pair):
             info = self.venues.get(venue)
             if not info or info.venue_type != VenueType.DEX:
@@ -66,6 +98,8 @@ class DetectionContext:
             book = self.cache.get_book(venue, pair)
             if book and book.reserve_base:
                 out.append((venue, book))
+        if self._memo_active:
+            self._memo_dex[pair] = out
         return out
 
 
