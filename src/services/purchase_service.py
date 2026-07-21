@@ -124,10 +124,14 @@ class PurchaseService:
         if purchase is None:
             log.warning("settle_unknown_purchase", payment_id=receipt.payment_id)
             return None
-        return await self.mark_paid(purchase.id, external_payment_id=receipt.payment_id)
+        return await self.mark_paid(
+            purchase.id, external_payment_id=receipt.invoice_id or receipt.payment_id,
+            asset=receipt.asset, provider_payload=receipt.raw)
 
     async def mark_paid(self, purchase_id: str,
-                        external_payment_id: str | None = None) -> Purchase | None:
+                        external_payment_id: str | None = None,
+                        asset: str | None = None,
+                        provider_payload: dict | None = None) -> Purchase | None:
         """Settle a purchase and grant its product. Idempotent on replay."""
         async with self._db.session() as session:
             purchase = await PurchaseRepository(session).get(purchase_id)
@@ -163,6 +167,10 @@ class PurchaseService:
             fresh.paid_at = time.time()
             if external_payment_id:
                 fresh.external_payment_id = external_payment_id
+            if asset:
+                fresh.asset = asset
+            if provider_payload:
+                fresh.provider_payload = provider_payload
             await repo.save(fresh)
             log.info("purchase_paid", purchase_id=purchase_id, user_id=fresh.user_id,
                      amount=float(fresh.amount), payment_id=external_payment_id)

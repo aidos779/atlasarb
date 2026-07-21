@@ -18,6 +18,7 @@ from src.database.repositories.misc_repos import NotificationRepository
 from src.database.repositories.user_repo import UserRepository
 from src.i18n import t
 from src.services.notification_service import Notifier
+from src.services.payments.reconciler import PaymentReconciler
 from src.services.signal_registry import SignalRegistry
 from src.services.subscription_service import SubscriptionService
 
@@ -26,10 +27,15 @@ log = get_logger("services.scheduler")
 
 class BackgroundScheduler:
     def __init__(self, database: Database, registry: SignalRegistry,
-                 subscriptions: SubscriptionService) -> None:
+                 subscriptions: SubscriptionService, *,
+                 reconciler: PaymentReconciler | None = None) -> None:
         self._db = database
         self._registry = registry
         self._subscriptions = subscriptions
+        # Optional crypto-payment reconciler. When wired (a real provider is configured)
+        # every tick polls open invoices so a missed webhook still settles. None keeps the
+        # scheduler payment-agnostic — the default in tests and placeholder deployments.
+        self._reconciler = reconciler
         self._notifier: Notifier | None = None
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -61,6 +67,14 @@ class BackgroundScheduler:
     async def _tick(self) -> None:
         await self._purge_mutes()
         await self._daily_summaries()
+        await self._reconcile_payments()
+
+    async def _reconcile_payments(self) -> None:
+        if self._reconciler is None:
+            return
+        settled = await self._reconciler.run_once()
+        if settled:
+            log.info("payments_reconciled", settled=settled)
 
     async def _purge_mutes(self) -> None:
         async with self._db.session() as session:

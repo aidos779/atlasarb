@@ -45,7 +45,7 @@ from src.config.scanner_config import ConfigManager, ScannerConfig
 from src.database.base import Database
 from src.database.repositories.history_repo import HistoryRepository
 from src.domain.dev_mode import set_unlimited_access
-from src.i18n import LANGUAGES, validate_catalog
+from src.i18n import LANGUAGES, t, validate_catalog
 from src.scanner.adapters.fx import FxRateProvider
 from src.scanner.adapters.registry import build_scanner_components
 from src.scanner.adapters.rpc_health import log_startup_rpc_health
@@ -56,7 +56,13 @@ from src.services.engine_bridge import EngineBridge
 from src.services.favorites_service import FavoritesService
 from src.services.history_service import HistoryService
 from src.services.notification_service import NotificationService
-from src.services.payments import PlaceholderPaymentProvider
+from src.services.payments import (
+    CryptoPayClient,
+    CryptoPayProvider,
+    CryptoPayWebhookHandler,
+    PaymentReconciler,
+    PlaceholderPaymentProvider,
+)
 from src.services.product_catalog import ProductCatalog
 from src.services.purchase_service import PurchaseService
 from src.services.rate_limiter import SlidingWindowLimiter
@@ -78,6 +84,7 @@ _COMMANDS = [
     BotCommand(command="history", description="Signal history (Paid)"),
     BotCommand(command="profile", description="Your profile"),
     BotCommand(command="subscription", description="Subscription & plans"),
+    BotCommand(command="buy", description="Buy Lifetime access"),
     BotCommand(command="settings", description="Settings"),
     BotCommand(command="search", description="Search coins/exchanges"),
     BotCommand(command="help", description="Help"),
@@ -196,15 +203,31 @@ class Application:
         admin = AdminService(self.database, self.engine)
         support = SupportService(self.database)
         signal_access = SignalAccessService(self.database, catalog)
-        # No crypto processor is wired yet; the placeholder refuses checkout rather than
-        # pretending it succeeded. Swap in a real adapter here (see services/payments).
-        payments = PlaceholderPaymentProvider()
+        # Live Telegram Crypto Pay when CRYPTO_PAY_TOKEN is set; otherwise the placeholder
+        # refuses checkout rather than pretending it succeeded (see services/payments).
+        payments, self._crypto_client = self._build_payment_provider()
         purchases = PurchaseService(self.database, subscriptions, payments)
+        # Late-bound in run() once the Telegram notifier exists; the webhook/reconciler
+        # confirmation callbacks read it at call time.
+        self._payment_notifier = None
+        self._webhook_runner = None
+        self.payment_webhook: CryptoPayWebhookHandler | None = None
+        reconciler: PaymentReconciler | None = None
+        if self._crypto_client is not None:
+            price_usd = catalog.pro_lifetime().amount_float
+            reconciler = PaymentReconciler(
+                self.database, self._crypto_client, purchases,
+                on_paid=self._send_payment_confirmation)
+            self.payment_webhook = CryptoPayWebhookHandler(
+                self.database, self._crypto_client, purchases, price_usd=price_usd,
+                accepted_assets=self.settings.crypto_pay_asset_list,
+                on_paid=self._send_payment_confirmation)
         self.notifications = NotificationService(
             self.database, self.bridge, lambda: self.config_manager.config,
             on_sent=self.engine.metrics.record_notification_sent,
             signal_access=signal_access)
-        self.scheduler = BackgroundScheduler(self.database, self.registry, subscriptions)
+        self.scheduler = BackgroundScheduler(
+            self.database, self.registry, subscriptions, reconciler=reconciler)
 
         self.ctx = BotContext(
             settings=self.settings, config_manager=self.config_manager,
@@ -223,6 +246,69 @@ class Application:
         )
         self.dp = Dispatcher()
         self._setup_dispatcher()
+
+    def _build_payment_provider(self):
+        """(provider, crypto_client|None). A configured CRYPTO_PAY_TOKEN wires the live
+        Crypto Pay provider; otherwise the placeholder keeps checkout as "coming soon"."""
+        if not self.settings.crypto_pay_token:
+            log.info("payment_provider_placeholder",
+                     note="no CRYPTO_PAY_TOKEN — checkout shows 'coming soon'")
+            return PlaceholderPaymentProvider(), None
+        client = CryptoPayClient(
+            self.settings.crypto_pay_token, self.settings.crypto_pay_api_url)
+        provider = CryptoPayProvider(
+            client, accepted_assets=self.settings.crypto_pay_asset_list,
+            expires_in=self.settings.crypto_pay_invoice_expires_sec)
+        log.info("payment_provider_cryptopay",
+                 assets=self.settings.crypto_pay_asset_list,
+                 webhook=self.settings.crypto_pay_webhook_enabled)
+        return provider, client
+
+    async def _send_payment_confirmation(self, purchase) -> None:
+        """Deliver the "🎉 Payment received!" message in the buyer's language. Shared by
+        the webhook handler and the polling reconciler; idempotency upstream guarantees it
+        fires exactly once per settled purchase."""
+        notifier = self._payment_notifier
+        if notifier is None:
+            return
+        profile = await self.ctx.users.get(purchase.user_id)
+        lang = profile.settings.language.value if profile else "en"
+        text = "\n\n".join([
+            t("payment.confirmed.title", lang),
+            t("payment.confirmed.body", lang),
+            t("payment.confirmed.thanks", lang),
+        ])
+        await notifier.send_text(purchase.user_id, text)
+
+    async def _start_webhook_server(self) -> None:
+        """Start the inbound Crypto Pay webhook listener (opt-in). No-op without a live
+        provider or when disabled — the polling reconciler settles invoices either way."""
+        if self.payment_webhook is None or not self.settings.crypto_pay_webhook_enabled:
+            return
+        from aiohttp import web
+
+        async def handle(request: web.Request) -> web.Response:
+            raw = await request.read()
+            signature = request.headers.get("crypto-pay-api-signature", "")
+            result = await self.payment_webhook.handle(raw, signature)
+            # 400 only for an unparseable body (so Crypto Pay retries a genuine glitch);
+            # every deliberate refusal returns 200 so it is not redelivered forever.
+            code = 400 if result.status == "malformed" else 200
+            return web.json_response(
+                {"ok": result.ok, "status": result.status}, status=code)
+
+        app = web.Application()
+        app.router.add_post(self.settings.crypto_pay_webhook_path, handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.settings.crypto_pay_webhook_host,
+                           self.settings.crypto_pay_webhook_port)
+        await site.start()
+        self._webhook_runner = runner
+        log.info("crypto_pay_webhook_listening",
+                 host=self.settings.crypto_pay_webhook_host,
+                 port=self.settings.crypto_pay_webhook_port,
+                 path=self.settings.crypto_pay_webhook_path)
 
     def _setup_dispatcher(self) -> None:
         ctx_mw = ContextMiddleware(self.ctx)
@@ -250,6 +336,9 @@ class Application:
         notifier = TelegramNotifier(self.bot, self.ctx.users, self.fx, self.registry)
         self.notifications.bind_notifier(notifier)
         self.scheduler.bind_notifier(notifier)
+        # Payment confirmations reuse the same notifier once it exists.
+        self._payment_notifier = notifier
+        await self._start_webhook_server()
 
         await self.engine.start()
         # Fire-and-forget: probe every configured RPC endpoint once and log how many are
@@ -270,6 +359,8 @@ class Application:
 
     async def shutdown(self) -> None:
         log.info("bot_shutting_down")
+        if self._webhook_runner is not None:
+            await self._webhook_runner.cleanup()
         await self.notifications.stop()
         await self.scheduler.stop()
         await self.engine.stop()

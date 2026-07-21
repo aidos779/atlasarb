@@ -8,7 +8,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import (
@@ -156,10 +156,35 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # ── Payments ──
-    # No provider is wired yet (see services/payments). The webhook secret is validated
-    # for production now so the seam cannot be filled in later without one.
+    # The webhook secret is validated for production so the seam cannot be filled in
+    # later without one. (Telegram Crypto Pay signs webhooks with the API token itself —
+    # see CryptoPayClient.verify_signature — so this secret guards any non-CryptoPay
+    # callback path and is kept as a production-hardening backstop.)
     payment_webhook_secret: str = "change-me-payment"
-    price_pro_lifetime_usd: float = 20.0
+    # LIFETIME_PRICE_USD is accepted as an alias so the price reads the way the product
+    # is described ("$20 lifetime"); PRICE_PRO_LIFETIME_USD stays valid for compatibility.
+    price_pro_lifetime_usd: float = Field(
+        default=20.0,
+        validation_alias=AliasChoices("price_pro_lifetime_usd", "lifetime_price_usd"))
+
+    # ── Telegram Crypto Pay (Crypto Bot) ──
+    # CRYPTO_PAY_TOKEN is the app token from @CryptoBot → Crypto Pay → My Apps. Empty
+    # keeps the PlaceholderPaymentProvider (checkout shows "coming soon"); set it to wire
+    # the live provider at the composition root. The token also keys webhook signature
+    # verification, so it must be kept secret.
+    crypto_pay_token: str = ""
+    crypto_pay_api_url: str = "https://pay.crypt.bot/api"
+    # Crypto assets a payer may settle the fiat-priced invoice in. Crypto Bot converts the
+    # $20 USD price to the chosen asset at pay time, so adding an asset is one CSV entry.
+    crypto_pay_assets: str = "USDT,TON,BTC"
+    # Invoice lifetime; an unpaid invoice past this is reconciled to EXPIRED.
+    crypto_pay_invoice_expires_sec: int = 3600
+    # Optional inbound webhook listener (long-polling deployments have no web server of
+    # their own). Disabled by default; the polling reconciler settles invoices without it.
+    crypto_pay_webhook_enabled: bool = False
+    crypto_pay_webhook_host: str = "0.0.0.0"
+    crypto_pay_webhook_port: int = 8080
+    crypto_pay_webhook_path: str = "/crypto-pay/webhook"
 
     # ── CEX endpoints ──
     # api.binance.com / stream.binance.com return HTTP 451 from restricted locations.
@@ -253,6 +278,16 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
+
+    @property
+    def crypto_pay_asset_list(self) -> list[str]:
+        """Accepted crypto assets for a checkout, upper-cased and de-duplicated."""
+        seen: list[str] = []
+        for asset in _split_csv(self.crypto_pay_assets):
+            token = asset.upper()
+            if token not in seen:
+                seen.append(token)
+        return seen
 
     def production_config_errors(self) -> list[str]:
         """Fatal misconfigurations for a production boot — empty list means safe to start.

@@ -39,11 +39,20 @@ class Invoice:
 
 @dataclass(frozen=True)
 class PaymentReceipt:
-    """A payment the provider has verified as settled."""
+    """A payment the provider has verified as settled.
+
+    ``payment_id`` carries whatever the invoice ``payload`` held — our purchase id — so
+    the purchase service can resolve the receipt to the row it settles. The crypto fields
+    are populated by providers that expose them (the asset the payer chose, the provider
+    invoice id, and the raw verified update) and are recorded on the purchase for audit.
+    """
 
     payment_id: str
     user_id: int
     amount_usd: float
+    asset: str | None = None
+    invoice_id: str | None = None
+    raw: dict | None = None
 
 
 @runtime_checkable

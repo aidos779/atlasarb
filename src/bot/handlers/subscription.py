@@ -85,19 +85,26 @@ async def compare_plans(cb: CallbackQuery, ctx: BotContext, profile: UserProfile
     await cb.message.edit_text("\n".join(lines), reply_markup=plan_comparison(pricing, lang))
 
 
-@router.callback_query(F.data == "sub:buy")
-async def buy_pro(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+async def open_checkout(event, ctx: BotContext, profile: UserProfile) -> None:
     """Checkout entry point — opens a purchase and asks the provider for an invoice.
 
-    The full lifecycle already runs here: a Purchase row is created (or an abandoned
-    one resumed) and moves to PENDING once an invoice exists. With the placeholder
-    provider no invoice can be issued, so the purchase is closed as CANCELLED and the
-    user sees "coming soon" — nothing is granted, and no payment is faked.
+    Shared by the ``sub:buy`` button, the paywall CTA and the ``/buy`` command. The full
+    lifecycle runs here: a Purchase row is created (or an abandoned one resumed) and moves
+    to PENDING once an invoice exists. With the placeholder provider no invoice can be
+    issued, so the purchase is closed as CANCELLED and the user sees "coming soon" —
+    nothing is granted, and no payment is faked. Pro unlocks only on a verified settlement
+    (webhook or the polling reconciler), never here.
     """
-    await ack(cb)
     lang = profile.settings.language.value
+
+    async def render(text: str, markup) -> None:
+        if isinstance(event, CallbackQuery):
+            await event.message.edit_text(text, reply_markup=markup)
+        else:
+            await event.answer(text, reply_markup=markup)
+
     if profile.subscription.is_pro:
-        await cb.message.edit_text(t("subscription.already_pro", lang))
+        await render(t("subscription.already_pro", lang), None)
         return
     product = ctx.subscriptions.pro_product()
     checkout = await ctx.purchases.start_checkout(profile.telegram_user_id, product)
@@ -106,12 +113,21 @@ async def buy_pro(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> N
             t("subscription.checkout_title", lang, price=product.format_amount()),
             t("subscription.checkout_soon", lang),
         ])
-        await cb.message.edit_text(text,
-                                   reply_markup=back_home(lang, back="menu:subscription"))
+        await render(text, back_home(lang, back="menu:subscription"))
         return
     text = "\n\n".join([
         t("subscription.checkout_title", lang, price=product.format_amount()),
         t("subscription.checkout_open", lang),
     ])
-    await cb.message.edit_text(
-        text, reply_markup=checkout_keyboard(checkout.pay_url or "", lang))
+    await render(text, checkout_keyboard(checkout.pay_url or "", lang))
+
+
+@router.callback_query(F.data == "sub:buy")
+async def buy_pro(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await ack(cb)
+    await open_checkout(cb, ctx, profile)
+
+
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, ctx: BotContext, profile: UserProfile) -> None:
+    await open_checkout(message, ctx, profile)

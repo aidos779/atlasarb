@@ -217,12 +217,53 @@ class Purchase(Base):
     amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     status: Mapped[str] = mapped_column(String(16), default="created")
     provider: Mapped[str] = mapped_column(String(32), default="")
+    #: Provider-scoped id — the Crypto Pay invoice id. Unique when set, which is what
+    #: makes a replayed callback resolve to the invoice it already settled.
     external_payment_id: Mapped[str | None] = mapped_column(String(128))
+    #: Crypto asset the payer actually settled in (USDT/TON/BTC…), recorded on settlement.
+    asset: Mapped[str | None] = mapped_column(String(16))
+    #: Last provider snapshot of the invoice (JSON), kept for support/audit.
+    provider_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PaymentEvent(Base):
+    """Append-only webhook history for the crypto payment provider.
+
+    One row per inbound provider callback (and per polling reconciliation), storing the
+    raw payload, whether its signature verified, and whether it drove an activation. It
+    is never updated except to flip ``processed`` once, and never deleted — a payment
+    dispute is resolved from this table, so webhook history must not be lost.
+
+    ``(provider, update_id)`` is unique, which is the duplicate-webhook guard: a provider
+    redelivering the same signed update cannot create a second history row, and the
+    pre-insert check short-circuits it as already seen. ``update_id`` is NULL for events
+    with no provider update id behind them (a polling reconciliation), and NULLs are
+    distinct under the constraint so those never collide.
+    """
+
+    __tablename__ = "payment_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "update_id", name="uq_payment_event_update"),
+        Index("ix_payment_event_invoice", "invoice_id"),
+        Index("ix_payment_event_purchase", "purchase_id"),
+        Index("ix_payment_event_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    update_id: Mapped[int | None] = mapped_column(BigInteger)
+    invoice_id: Mapped[str | None] = mapped_column(String(64))
+    purchase_id: Mapped[str | None] = mapped_column(String(36))
+    event_type: Mapped[str] = mapped_column(String(32), default="")
+    signature_valid: Mapped[bool] = mapped_column(Boolean, default=False)
+    processed: Mapped[bool] = mapped_column(Boolean, default=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class SubscriptionEvent(Base):

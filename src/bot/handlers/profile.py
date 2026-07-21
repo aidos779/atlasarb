@@ -4,6 +4,7 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.callbacks import ack
 from src.bot.context import BotContext
@@ -16,16 +17,16 @@ router = Router(name="profile")
 
 
 @router.message(Command("profile"))
-async def cmd_profile(message: Message, profile: UserProfile) -> None:
-    await _render_profile(message, profile)
+async def cmd_profile(message: Message, ctx: BotContext, profile: UserProfile) -> None:
+    await _render_profile(message, ctx, profile)
 
 
 @router.callback_query(F.data == "menu:profile")
-async def menu_profile(cb: CallbackQuery, profile: UserProfile) -> None:
-    await _render_profile(cb, profile)
+async def menu_profile(cb: CallbackQuery, ctx: BotContext, profile: UserProfile) -> None:
+    await _render_profile(cb, ctx, profile)
 
 
-async def _render_profile(event, profile: UserProfile) -> None:
+async def _render_profile(event, ctx: BotContext, profile: UserProfile) -> None:
     lang = profile.settings.language.value
     since = (format_datetime(profile.created_at, profile.settings.timezone)
              if profile.created_at else t("profile.unknown", lang))
@@ -33,9 +34,27 @@ async def _render_profile(event, profile: UserProfile) -> None:
         t("profile.title", lang), "",
         f"{profile.first_name or ''} @{profile.username or t('profile.unknown', lang)}",
         f"{t('profile.member_since', lang)}: {since}",
-        f"{t('profile.tier', lang)}: {tier_label(profile.effective_tier, lang)}",
+        f"{t('profile.plan', lang)}: {tier_label(profile.effective_tier, lang)}",
     ]
-    kb = back_home(lang)
+
+    b = InlineKeyboardBuilder()
+    if profile.subscription.is_pro:
+        lines.append(f"{t('profile.signals', lang)}: {t('profile.signals_unlimited', lang)}")
+        lines.append(f"{t('profile.payment', lang)}: {t('profile.payment_completed', lang)}")
+    else:
+        allowance = await ctx.signal_access.allowance(profile)
+        if allowance.unlimited:
+            # Staff / dev builds resolve to unlimited without a purchase.
+            lines.append(
+                f"{t('profile.signals', lang)}: {t('profile.signals_unlimited', lang)}")
+        else:
+            lines.append(t("profile.signals_used", lang, used=allowance.delivered,
+                           quota=allowance.quota))
+            lines.append(t("profile.remaining", lang, remaining=allowance.remaining))
+            b.button(text=t("btn.upgrade", lang), callback_data="sub:buy")
+
+    b.row(*back_home(lang).inline_keyboard[0])
+    kb = b.as_markup()
     if isinstance(event, CallbackQuery):
         await ack(event)
         await event.message.edit_text("\n".join(lines), reply_markup=kb)

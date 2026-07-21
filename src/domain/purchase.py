@@ -66,7 +66,9 @@ class Purchase:
     amount: Decimal
     status: PurchaseStatus = PurchaseStatus.CREATED
     provider: str = ""
-    external_payment_id: str | None = None   # provider-scoped id, unique when set
+    external_payment_id: str | None = None   # provider-scoped id (invoice id), unique when set
+    asset: str | None = None                 # crypto asset actually paid (USDT/TON/BTC…)
+    provider_payload: dict | None = None     # last provider snapshot of the invoice
     detail: str | None = None
     created_at: float | None = None
     updated_at: float | None = None

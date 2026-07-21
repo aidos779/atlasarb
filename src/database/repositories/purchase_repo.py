@@ -26,6 +26,8 @@ def _to_domain(row: PurchaseRow) -> Purchase:
         status=PurchaseStatus(row.status),
         provider=row.provider,
         external_payment_id=row.external_payment_id,
+        asset=row.asset,
+        provider_payload=dict(row.provider_payload or {}),
         detail=row.detail,
         created_at=_ts(row.created_at),
         updated_at=_ts(row.updated_at),
@@ -44,6 +46,8 @@ class PurchaseRepository:
             amount=float(purchase.amount), status=purchase.status.value,
             provider=purchase.provider,
             external_payment_id=purchase.external_payment_id,
+            asset=purchase.asset,
+            provider_payload=purchase.provider_payload or {},
             detail=purchase.detail,
         ))
         await self._session.flush()
@@ -76,6 +80,20 @@ class PurchaseRepository:
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_domain(row) if row else None
 
+    async def pending_with_invoice(self, provider: str,
+                                   limit: int = 100) -> list[Purchase]:
+        """PENDING purchases that carry a provider invoice id — the reconciler polls
+        each invoice's status so a missed webhook still settles (or expires)."""
+        stmt = (
+            select(PurchaseRow)
+            .where(PurchaseRow.status == PurchaseStatus.PENDING.value,
+                   PurchaseRow.provider == provider,
+                   PurchaseRow.external_payment_id.is_not(None))
+            .order_by(PurchaseRow.created_at.asc())
+            .limit(limit)
+        )
+        return [_to_domain(r) for r in (await self._session.execute(stmt)).scalars()]
+
     async def history(self, user_id: int, limit: int = 20) -> list[Purchase]:
         stmt = (
             select(PurchaseRow)
@@ -92,6 +110,8 @@ class PurchaseRepository:
         row.status = purchase.status.value
         row.provider = purchase.provider
         row.external_payment_id = purchase.external_payment_id
+        row.asset = purchase.asset
+        row.provider_payload = purchase.provider_payload or {}
         row.detail = purchase.detail
         row.paid_at = (
             datetime.fromtimestamp(purchase.paid_at, tz=UTC)
