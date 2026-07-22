@@ -108,7 +108,10 @@ class BaseCexAdapter(ExchangeAdapter):
         self._stop = asyncio.Event()
         self._on_success = on_success or (lambda latency=0.0, stream=False: None)
         self._on_failure = on_failure or (lambda hard=False: None)
-        self._taker_fee = Decimal("0.001")   # 0.10% MVP default (§8.3)
+        # Per-venue taker rate from central config (§8.3 / §20) — no hardcoded flat rate.
+        # `id` is normally the subclass's class attribute; a subclass that assigns it
+        # only after super().__init__ resolves to the config default rate.
+        self._taker_fee = Decimal(str(config.cex_taker_fee(getattr(self, "id", ""))))
         # Optional per-venue proxy chain (primary first, then fallbacks). Empty = direct.
         # The active proxy applies to both REST and WS because they share the session's
         # connector; on repeated failure the chain rotates (proxy failover) and the

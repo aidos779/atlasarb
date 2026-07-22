@@ -28,7 +28,7 @@ def test_risk_high_for_cross_chain():
 
 def _rank_inputs(**kw):
     base = dict(
-        net_profit_usd=Decimal("400"), roi_pct=Decimal("3"),
+        net_profit_usd=Decimal("400"),
         profit_reference_usd=Decimal("500"), liquidity_score=Decimal("90"),
         confidence_score=Decimal("95"), risk=RiskScore.LOW,
         arb_type=ArbitrageType.CEX_CEX, bridge_time_sec=None, warmed_up=True)

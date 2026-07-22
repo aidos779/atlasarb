@@ -96,6 +96,7 @@ class ScanningEngine:
         queue: NotificationQueue, history: SignalHistoryStore, gas: GasPriceProvider,
         verified_tokens: set[str], cache: MarketStateCache | None = None,
         health: HealthRegistry | None = None, perp_assets: set[str] | None = None,
+        reliability_provider=None,
     ) -> None:
         self._config = config
         self._adapters = adapters
@@ -108,7 +109,8 @@ class ScanningEngine:
         self._lifecycle = LifecycleManager(config, self._cooldown, queue, history)
         self._bridges = BridgeRegistry()
         self._assembler = SignalAssembler(
-            config, self._cache, self._health, adapters, gas, self._priority
+            config, self._cache, self._health, adapters, gas, self._priority,
+            reliability_provider=reliability_provider,
         )
         self._rpc_down_since: dict[str, float] = {}  # network -> when it went fully down
         self._verified_tokens = {t.upper() for t in verified_tokens}
@@ -352,7 +354,7 @@ class ScanningEngine:
                                              result.reject_reason.value)
             # Spread closed on an active signal -> immediate expiry (§12.4).
             if result.reject_reason.value in ("BELOW_MIN_PROFIT", "UNPROFITABLE_AFTER_FEES"):
-                await self._lifecycle.close_if_spread_gone(cand.dedup_key(), 0)
+                await self._lifecycle.close_if_spread_gone(cand.dedup_key())
             return
         signal = result.signal
         published, event = await self._lifecycle.admit(signal)

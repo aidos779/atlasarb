@@ -54,7 +54,7 @@ from src.services.admin_service import AdminService
 from src.services.analytics_service import AnalyticsService
 from src.services.engine_bridge import EngineBridge
 from src.services.favorites_service import FavoritesService
-from src.services.history_service import HistoryService
+from src.services.history_service import HistoryService, ReliabilityCache
 from src.services.notification_service import NotificationService
 from src.services.payments import (
     CryptoPayClient,
@@ -184,9 +184,13 @@ class Application:
             self.registry, self.database,
             history_repo_factory=lambda s: HistoryRepository(s),
         )
+        # Historical reliability (§11.5): sync TTL-cache over the archived-signal
+        # hit-rate; the assembler reads it per candidate without touching the DB.
+        history = HistoryService(self.database)
         self.engine = ScanningEngine(
             config, components.adapters, self.bridge, self.bridge, components.gas,
             components.verified_tokens, cache=components.cache, health=components.health,
+            reliability_provider=ReliabilityCache(history),
         )
         self.config_manager.subscribe(self.engine.update_config)
         self.fx = FxRateProvider()
@@ -197,7 +201,6 @@ class Application:
         catalog = ProductCatalog(self.settings)
         subscriptions = SubscriptionService(self.database, self.settings, catalog)
         favorites = FavoritesService(self.database)
-        history = HistoryService(self.database)
         search = SearchService(self.registry, exchange_names)
         analytics = AnalyticsService(self.registry, self.engine)
         admin = AdminService(self.database, self.engine)

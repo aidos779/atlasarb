@@ -28,14 +28,22 @@ class CooldownStore:
     def update_config(self, config: ScannerConfig) -> None:
         self._config = config
 
+    # Above this size, on_expired() opportunistically purges already-elapsed entries.
+    # Entries are otherwise removed only when their key is queried again, so a route
+    # that never re-appears would leave its entry behind forever (slow leak over weeks
+    # of churning listings). The purge is O(n) but runs only on expiry of a signal
+    # while the store is unusually large — never on the hot read path.
+    _PURGE_THRESHOLD = 1024
+
     def on_expired(self, key: tuple, arb_type: ArbitrageType, now: float | None = None) -> None:
         """Enter cooldown after a signal expires (§13.2)."""
         duration = self._config.cooldown_for(arb_type.value)
         if duration <= 0:  # Funding: interval-governed, no flat cooldown
             return
-        self._cooldowns[key] = _CooldownEntry(
-            until=(now or time.time()) + duration, arb_type=arb_type
-        )
+        now = now or time.time()
+        if len(self._cooldowns) > self._PURGE_THRESHOLD:
+            self._cooldowns = {k: e for k, e in self._cooldowns.items() if e.until > now}
+        self._cooldowns[key] = _CooldownEntry(until=now + duration, arb_type=arb_type)
 
     def in_cooldown(self, key: tuple, now: float | None = None) -> bool:
         entry = self._cooldowns.get(key)

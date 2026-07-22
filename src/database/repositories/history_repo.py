@@ -65,14 +65,34 @@ class HistoryRepository:
         ).order_by(SignalInteraction.created_at.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
+    # A SPREAD_CLOSED shorter than this is treated as a phantom (a bad tick / collision
+    # that collapsed the moment it was re-checked); at or above it the signal was a real
+    # opportunity that got arbitraged away — a *success* for reliability purposes.
+    _PHANTOM_LIFETIME_SEC = 10.0
+
     async def type_reliability(self, arb_type: str, buy: str, sell: str) -> float:
-        """Rolling hit-rate proxy for the confidence factor (§11.5). 0..100."""
-        stmt = select(SignalHistory.expiry_reason).where(
+        """Rolling hit-rate proxy for the confidence factor (§11.5). 0..100.
+
+        "Good" = the signal described a real opportunity: held to TTL / funding
+        settlement, OR its spread closed after a plausible lifetime (someone traded
+        it — the strongest confirmation the opportunity existed). "Bad" = near-instant
+        spread collapse (phantom data) or venue/listing failures. Counting every
+        SPREAD_CLOSED as a failure penalized exactly the most-executed real routes.
+        """
+        stmt = select(SignalHistory.expiry_reason, SignalHistory.detected_at,
+                      SignalHistory.expired_at).where(
             SignalHistory.arb_type == arb_type,
             SignalHistory.buy_exchange == buy, SignalHistory.sell_exchange == sell,
         ).order_by(SignalHistory.expired_at.desc()).limit(50)
-        reasons = [r for r in (await self._session.execute(stmt)).scalars()]
-        if not reasons:
+        rows = list((await self._session.execute(stmt)).all())
+        if not rows:
             return 60.0
-        held = sum(1 for r in reasons if r in ("TTL_EXCEEDED", "FUNDING_SETTLED"))
-        return round(held / len(reasons) * 100, 1)
+        good = 0
+        for reason, detected_at, expired_at in rows:
+            if reason in ("TTL_EXCEEDED", "FUNDING_SETTLED"):
+                good += 1
+            elif reason == "SPREAD_CLOSED" and detected_at and expired_at:
+                lifetime = (expired_at - detected_at).total_seconds()
+                if lifetime >= self._PHANTOM_LIFETIME_SEC:
+                    good += 1
+        return round(good / len(rows) * 100, 1)

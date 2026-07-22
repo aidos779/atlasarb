@@ -61,7 +61,6 @@ def risk_penalty_value(risk: RiskScore) -> Decimal:
 @dataclass
 class RankInputs:
     net_profit_usd: Decimal
-    roi_pct: Decimal
     profit_reference_usd: Decimal
     liquidity_score: Decimal
     confidence_score: Decimal

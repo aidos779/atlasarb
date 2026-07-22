@@ -43,22 +43,28 @@ def _fees(buy_rate, sell_rate, withdrawal="1", gas="2"):
 
 
 def _legacy_costs(size_usd, buy_leg, sell_leg, fees):
-    """The pre-split cost maths, verbatim, as the invariant's reference point."""
+    """The pre-split cost maths, verbatim, as the invariant's reference point.
+
+    Mirrors the engine's *aggregate* model (physical base quantity: base bought at the
+    buy fill price, the exact same quantity sold) so the invariant isolates the
+    reclassification step alone.
+    """
     buy_best, sell_best = buy_leg.best_price(), sell_leg.best_price()
-    base_size = size_usd / buy_best
     buy_fill = buy_leg.fill_price(size_usd)
-    sell_fill = sell_leg.fill_price(size_usd)
+    base_size = size_usd / buy_fill
+    sell_notional = base_size * sell_best
+    sell_fill = sell_leg.fill_price(sell_notional)
     gross = base_size * (sell_best - buy_best)
     slippage = (max(Decimal(0), (buy_fill - buy_best) * base_size)
                 + max(Decimal(0), (sell_best - sell_fill) * base_size))
-    trading = (base_size * buy_best * (fees.buy_fee_rate or Decimal(0))
-               + base_size * sell_best * (fees.sell_fee_rate or Decimal(0)))
+    trading = (size_usd * (fees.buy_fee_rate or Decimal(0))
+               + base_size * sell_fill * (fees.sell_fee_rate or Decimal(0)))
     conversion = size_usd * fees.conversion_cost_bps / Decimal(10000)
     net = (gross - trading - (fees.withdrawal_fee_usd or Decimal(0))
            - (fees.gas_fee_usd or Decimal(0)) - (fees.bridge_fee_usd or Decimal(0))
            - slippage - conversion)
     return {"net": net, "trading": trading, "slippage": slippage,
-            "pct": net / size_usd * Decimal(100)}
+            "sell_notional": sell_notional, "pct": net / size_usd * Decimal(100)}
 
 
 # ── the leg-level primitive ──
@@ -94,11 +100,14 @@ def test_dex_dex_reports_the_real_pool_fee_not_zero(tier):
     bd = engine.compute_at_size(size, buy, sell, _fees(Decimal(0), Decimal(0)))
     assert bd is not None
     # Both legs' pool fees, at the pool's own tier — not a flat 0.3%, and not $0.00.
-    assert bd.trading_fees_usd == Decimal(tier) * size * 2
+    # The sell leg's fee applies to its own (physical) notional: base × sell_best.
+    # Summed per leg (the engine's association) — one Decimal ulp matters at 28 digits.
+    legacy = _legacy_costs(size, buy, sell, _fees(Decimal(0), Decimal(0)))
+    assert bd.trading_fees_usd == (Decimal(tier) * size
+                                   + Decimal(tier) * legacy["sell_notional"])
     assert bd.trading_fees_usd > 0
     # What is left over is price impact, and it is strictly less than the raw figure
     # the old code reported as "slippage".
-    legacy = _legacy_costs(size, buy, sell, _fees(Decimal(0), Decimal(0)))
     assert bd.slippage_cost_usd < legacy["slippage"]
     assert bd.slippage_cost_usd > 0
 
@@ -113,7 +122,9 @@ def test_small_trade_is_almost_all_fee_and_almost_no_impact():
     size = Decimal("10")
 
     bd = engine.compute_at_size(size, buy, sell, _fees(Decimal(0), Decimal(0)))
-    assert bd.trading_fees_usd == Decimal("0.003") * size * 2      # $0.06
+    legacy = _legacy_costs(size, buy, sell, _fees(Decimal(0), Decimal(0)))
+    assert bd.trading_fees_usd == (Decimal("0.003") * size
+                                   + Decimal("0.003") * legacy["sell_notional"])
     assert bd.slippage_cost_usd < bd.trading_fees_usd / 10         # impact is noise
     assert bd.slippage_cost_usd >= 0
 
@@ -128,9 +139,9 @@ def test_cex_dex_sums_one_fee_from_each_path():
 
     bd = engine.compute_at_size(size, cex_buy, dex_sell,
                                 _fees(Decimal("0.001"), Decimal(0)))
-    base_size = size / cex_buy.best_price()
-    cex_component = base_size * cex_buy.best_price() * Decimal("0.001")
-    dex_component = Decimal("0.003") * size
+    legacy = _legacy_costs(size, cex_buy, dex_sell, _fees(Decimal("0.001"), Decimal(0)))
+    cex_component = size * Decimal("0.001")               # taker fee on the spend
+    dex_component = Decimal("0.003") * legacy["sell_notional"]  # pool fee on its input
     assert bd.trading_fees_usd == cex_component + dex_component
 
 
@@ -186,8 +197,12 @@ def test_reclassification_does_not_move_any_total(tier, size, shape, pair):
     assert bd.net_profit_usd == legacy["net"]
     assert bd.net_profit_pct == legacy["pct"]
     assert bd.roi_pct == legacy["pct"]
-    # The two reclassified buckets still hold exactly the same total between them.
-    assert bd.trading_fees_usd + bd.slippage_cost_usd == legacy["trading"] + legacy["slippage"]
+    # The two reclassified buckets still hold the same total between them. Exact up to
+    # one Decimal ulp: the engine's (rate+pool)+(exec−pool) association can shift the
+    # 28th significant digit vs the un-split rate+exec sum; net/ROI stay exact above.
+    drift = ((bd.trading_fees_usd + bd.slippage_cost_usd)
+             - (legacy["trading"] + legacy["slippage"]))
+    assert abs(drift) <= Decimal("1e-18")
     # And the split is never allowed to go negative.
     assert bd.slippage_cost_usd >= 0
     assert bd.trading_fees_usd >= 0

@@ -63,6 +63,16 @@ class ScannerConfig:
     min_liquidity_dex_usd: float = 10000.0     # §9.1
     liquidity_score_floor: float = 30.0        # §9.4
     min_tradeable_size_usd: float = 100.0      # §10 liquidity gate
+    # ── Liquidity depth normalization references (§9.4) ──
+    # USD depth at which the depth component of the liquidity score saturates at 100,
+    # per priority tier. Distinct from the *profit* reference scale ($500/$200/$50):
+    # reusing that for depth meant any pair with ≥$500 executable depth scored 100,
+    # flattening the entire depth factor (60% of the score) into a constant. Values are
+    # deliberately far above the §9.1 floors so the score discriminates across the range
+    # the floors admit.
+    liquidity_ref_p1_usd: float = 250_000.0    # majors (BTC/ETH/SOL)
+    liquidity_ref_p2_usd: float = 100_000.0    # top-100
+    liquidity_ref_p3_usd: float = 25_000.0     # long tail
     max_sane_spread_pct: float = 20.0          # §4.5 invalid-price ceiling
     implausible_spread_pct: float = 1000.0     # §15.5 last-resort validator ceiling
     # CEX↔CEX price-spread plausibility ceiling (§4.5). Real same-asset spot spreads
@@ -72,6 +82,17 @@ class ScannerConfig:
     # Candidates above this are dropped in the detector, BEFORE the profit pipeline.
     # Does not apply to funding/cross-chain (their "spread" is a projected carry).
     max_plausible_cex_spread_pct: float = 10.0
+    # ── Per-venue CEX taker-fee rates (§8.3) ──
+    # Fraction (0.001 = 0.10%). A single flat MVP rate misestimated venues whose real
+    # taker differs (a 0.2%-taker venue produced signals whose true net was negative,
+    # a 0.05%-taker venue lost signals) — and the error propagated into every consumer
+    # of adapter.taker_fee(): the detector economic floor, the assembler pre-gate, the
+    # profit engine and funding breakeven. Seeded with current standard (non-VIP) spot
+    # taker rates; operator-overridable per venue without a code change (§20).
+    cex_taker_fee_by_venue: dict[str, float] = field(default_factory=lambda: {
+        "binance": 0.001, "okx": 0.001, "bitget": 0.001, "mexc": 0.0005,
+    })
+    cex_taker_fee_default: float = 0.001       # unknown venue fallback (conservative MVP)
     # Explicit ticker-collision denylist: base assets whose ticker maps to DIFFERENT
     # underlying tokens across venues (no shared identity), so a CEX↔CEX "spread" on them
     # is never a real arb. Dropped at the identity level BEFORE the spread heuristic, so a
@@ -296,6 +317,15 @@ class ScannerConfig:
     def min_liquidity_usd(self, venue_type: str) -> float:
         return self.min_liquidity_dex_usd if venue_type == "DEX" else self.min_liquidity_cex_usd
 
+    def cex_taker_fee(self, venue: str) -> float:
+        """Per-venue CEX spot taker rate (fraction); default for unknown venues (§8.3)."""
+        return self.cex_taker_fee_by_venue.get(venue, self.cex_taker_fee_default)
+
+    def liquidity_reference_usd(self, priority: int) -> float:
+        """Depth-normalization reference for the §9.4 liquidity score, per §1.6 tier."""
+        return {1: self.liquidity_ref_p1_usd, 2: self.liquidity_ref_p2_usd,
+                3: self.liquidity_ref_p3_usd}.get(priority, self.liquidity_ref_p3_usd)
+
 
 # ── Validation ranges (§20.3): param -> (min, max) ──
 _RANGES: dict[str, tuple[float, float]] = {
@@ -306,6 +336,10 @@ _RANGES: dict[str, tuple[float, float]] = {
     "max_slippage_dex_pct": (0.0, 100.0),
     "min_liquidity_cex_usd": (0.0, 1e9),
     "min_liquidity_dex_usd": (0.0, 1e9),
+    "liquidity_ref_p1_usd": (1.0, 1e12),
+    "liquidity_ref_p2_usd": (1.0, 1e12),
+    "liquidity_ref_p3_usd": (1.0, 1e12),
+    "cex_taker_fee_default": (0.0, 0.05),
     "liquidity_score_floor": (0.0, 100.0),
     "confidence_threshold": (0.0, 100.0),
     "rank_top_min": (0.0, 100.0),
@@ -340,6 +374,14 @@ def validate_config(cfg: ScannerConfig) -> None:
 
     if cfg.min_net_profit_usd < 0:
         raise ConfigError("min_net_profit_usd cannot be negative")
+
+    # Per-venue taker rates must be sane fractions (0..5%), not percents.
+    for venue, rate in cfg.cex_taker_fee_by_venue.items():
+        if not (0.0 <= rate <= 0.05):
+            raise ConfigError(
+                f"cex_taker_fee_by_venue[{venue}]={rate} out of range [0, 0.05] "
+                "(rates are fractions: 0.001 = 0.10%)"
+            )
 
     # Cooldown cannot exceed Max Signal Age for the same type (§20.3).
     for arb_type, cooldown in cfg.cooldown_by_type.items():

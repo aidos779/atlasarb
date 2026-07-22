@@ -33,13 +33,24 @@ class ProfitEngine:
         if not buy_best or not sell_best or buy_best <= 0 or size_usd <= 0:
             return None
 
-        base_size = size_usd / buy_best
         buy_fill = buy_leg.fill_price(size_usd)
-        sell_fill = sell_leg.fill_price(size_usd)
-        if buy_fill is None or sell_fill is None:
+        if buy_fill is None or buy_fill <= 0:
+            return None  # insufficient depth for this size
+        # Physical base quantity: spending size_usd at the *fill* price buys
+        # size_usd / buy_fill — not size_usd / buy_best (which overstated the held
+        # quantity by the buy leg's slippage, and with it gross and net). The sell leg
+        # is then sized to that exact quantity: passing base_size × sell_best makes
+        # both leg implementations (CexBookLeg divides by best; DexPoolLeg by spot)
+        # recover base_size precisely, so the same coins bought are the coins sold.
+        base_size = size_usd / buy_fill
+        sell_notional = base_size * sell_best
+        sell_fill = sell_leg.fill_price(sell_notional)
+        if sell_fill is None:
             return None  # insufficient depth for this size
 
-        # Gross uses best (top-of-book) prices; slippage captured separately (§8.7).
+        # Gross uses best (top-of-book) prices on the physical quantity; slippage is
+        # captured separately (§8.7). Identity (exact, no approximation):
+        #   proceeds - cost = base·sell_fill - size_usd = gross - buy_slip - sell_slip.
         gross = base_size * (sell_best - buy_best)
 
         # Execution cost per leg (§8.7) — buy fills worse (higher), sell worse (lower).
@@ -49,10 +60,11 @@ class ProfitEngine:
 
         # Fees charged on top of the fill price: a CEX taker fee settles outside the
         # book, so none of it is in the fill. A DEX leg's rate is 0 here (assembler) —
-        # its pool fee is inside the fill and is recovered below.
+        # its pool fee is inside the fill and is recovered below. Charged on the actual
+        # notionals: the buy fee on what was spent, the sell fee on what was received.
         buy_fee = fees.buy_fee_rate or Decimal(0)
         sell_fee = fees.sell_fee_rate or Decimal(0)
-        rate_fees = base_size * buy_best * buy_fee + base_size * sell_best * sell_fee
+        rate_fees = size_usd * buy_fee + base_size * sell_fill * sell_fee
 
         withdrawal = fees.withdrawal_fee_usd or Decimal(0)
         gas = fees.gas_fee_usd or Decimal(0)
@@ -76,7 +88,7 @@ class ProfitEngine:
         # the split can never manufacture or lose value: the two fields still sum to
         # rate_fees + execution_cost.
         pool_fees = (min(buy_leg.pool_fee_cost_usd(size_usd), buy_slip)
-                     + min(sell_leg.pool_fee_cost_usd(size_usd), sell_slip))
+                     + min(sell_leg.pool_fee_cost_usd(sell_notional), sell_slip))
         trading_fees = rate_fees + pool_fees
         slippage_cost = execution_cost - pool_fees
         capital = size_usd  # buy-side notional (+margin handled by funding detector)

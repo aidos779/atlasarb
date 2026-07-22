@@ -97,6 +97,7 @@ class MarketStateCache:
         self._books.pop(key, None)
         self._price_windows.pop(key, None)
         self._warmup.pop(key, None)
+        self._suspect.pop(key, None)
         # Both backing entries are gone — drop the venue from the pair index, and the
         # pair's set entirely once empty so the index never outgrows the live cache.
         venues = self._venues_by_pair.get(pair)

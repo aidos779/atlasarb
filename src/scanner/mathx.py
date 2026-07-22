@@ -127,10 +127,19 @@ def amm_max_size_within_slippage(
     reserve_in: Decimal, reserve_out: Decimal, fee_rate: Decimal,
     max_slippage_pct: Decimal,
 ) -> Decimal:
-    """Largest input size before price impact exceeds tolerance on an AMM pool (§9.2)."""
-    if reserve_in <= 0 or reserve_out <= 0:
+    """Largest input size before *price impact* exceeds tolerance on an AMM pool (§9.2).
+
+    Impact is measured against the zero-size effective price ``spot / (1 - fee)`` — the
+    price an infinitesimal swap already pays — not the raw spot. The flat pool fee is
+    size-independent and is charged (once) inside the fill price downstream; letting it
+    also consume the slippage-tolerance budget under-reported max size by the fee tier
+    (a 1% tier pool lost 1 of 1.5 p.p. of DEX tolerance at size zero). This mirrors the
+    CEX side, where VWAP-vs-best is pure book impact and the taker fee sits outside.
+    """
+    if reserve_in <= 0 or reserve_out <= 0 or fee_rate >= 1:
         return Decimal(0)
-    spot = reserve_in / reserve_out  # in per out at size 0+
+    # Effective in-per-out price at size 0+: curve spot marked up by the fee skim.
+    zero_size_price = (reserve_in / reserve_out) / (Decimal(1) - fee_rate)
     lo, hi = Decimal(0), reserve_in  # cannot input more than the pool holds
     for _ in range(60):
         mid = (lo + hi) / 2
@@ -138,7 +147,7 @@ def amm_max_size_within_slippage(
         if eff is None:
             hi = mid
             continue
-        impact = slippage_pct(eff, spot)
+        impact = slippage_pct(eff, zero_size_price)
         if impact > max_slippage_pct:
             hi = mid
         else:

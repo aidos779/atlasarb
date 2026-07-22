@@ -78,8 +78,15 @@ def test_dex_dex_charges_the_pool_fee_exactly_once(fee_tier):
 
     correct = engine.compute_at_size(size, buy, sell, _fees(Decimal(0), Decimal(0)))
     assert correct is not None
+    # Physical quantities as the engine computes them (base bought at the buy fill,
+    # the same quantity sold): the sell pool's fee applies to its own input notional.
+    buy_fill = buy.fill_price(size)
+    base_size = size / buy_fill
+    sell_notional = base_size * sell.best_price()
+    sell_fill = sell.fill_price(sell_notional)
     # Counted once, at the pool's real tier — never a flat 0.3%.
-    assert correct.trading_fees_usd == Decimal(fee_tier) * size * 2
+    assert correct.trading_fees_usd == (Decimal(fee_tier) * size
+                                        + Decimal(fee_tier) * sell_notional)
 
     # What the old code did: flat 0.3% per leg *on top of* the AMM-priced fill.
     doubled = engine.compute_at_size(
@@ -88,12 +95,15 @@ def test_dex_dex_charges_the_pool_fee_exactly_once(fee_tier):
     assert doubled.net_profit_usd < correct.net_profit_usd
 
     # The entire difference is the spurious rate-based second charge, nothing else:
-    # the pool fee itself and the price impact are identical in both runs.
-    base_size = size / buy.best_price()
-    spurious = (base_size * buy.best_price() * Decimal("0.003")
-                + base_size * sell.best_price() * Decimal("0.003"))
-    assert correct.net_profit_usd - doubled.net_profit_usd == spurious
-    assert doubled.trading_fees_usd - correct.trading_fees_usd == spurious
+    # the pool fee itself and the price impact are identical in both runs. Exact up to
+    # one Decimal ulp — the sequential subtractions in net round at 28 digits, so the
+    # difference of two nets can drift in the last digit vs the standalone product.
+    spurious = (size * Decimal("0.003")
+                + base_size * sell_fill * Decimal("0.003"))
+    assert abs((correct.net_profit_usd - doubled.net_profit_usd) - spurious) \
+        <= Decimal("1e-18")
+    assert abs((doubled.trading_fees_usd - correct.trading_fees_usd) - spurious) \
+        <= Decimal("1e-18")
     assert correct.slippage_cost_usd == doubled.slippage_cost_usd
 
 
@@ -122,17 +132,21 @@ def test_cex_dex_keeps_the_cex_rate_and_drops_the_dex_one():
     bd = engine.compute_at_size(size, cex_buy, dex_sell,
                                 _fees(Decimal("0.001"), Decimal(0)))
     assert bd is not None
-    base_size = size / cex_buy.best_price()
-    cex_rate_fee = base_size * cex_buy.best_price() * Decimal("0.001")
-    pool_fee = Decimal("0.003") * size
+    buy_fill = cex_buy.fill_price(size)
+    base_size = size / buy_fill
+    sell_notional = base_size * dex_sell.best_price()
+    sell_fill = dex_sell.fill_price(sell_notional)
+    cex_rate_fee = size * Decimal("0.001")            # taker fee on the spend
+    pool_fee = Decimal("0.003") * sell_notional       # pool fee on its own input
     # One rate-based charge (CEX) + one pool charge (DEX). Never the DEX rate too.
     assert bd.trading_fees_usd == cex_rate_fee + pool_fee
 
-    # Had the DEX rate not been zeroed, net would be lower by exactly that flat charge.
+    # Had the DEX rate not been zeroed, net would be lower by exactly that flat charge
+    # (the rate applies to the sell leg's actual proceeds, base × sell_fill).
     doubled = engine.compute_at_size(size, cex_buy, dex_sell,
                                      _fees(Decimal("0.001"), Decimal("0.003")))
     assert (bd.net_profit_usd - doubled.net_profit_usd
-            == base_size * dex_sell.best_price() * Decimal("0.003"))
+            == base_size * sell_fill * Decimal("0.003"))
 
 
 # ── the assembler wiring ──

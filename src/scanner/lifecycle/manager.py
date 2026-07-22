@@ -7,7 +7,6 @@ and keeps the active set free of expired entries so dedup lookups stay correct.
 from __future__ import annotations
 
 import time
-from decimal import Decimal
 
 from src.config import get_logger
 from src.config.scanner_config import ScannerConfig
@@ -148,9 +147,15 @@ class LifecycleManager:
                 count += 1
         return count
 
-    async def close_if_spread_gone(self, key: tuple, new_net_usd: Decimal) -> bool:
-        """§12.4 — immediate expiry when netProfit drops <= 0."""
-        if new_net_usd <= 0 and key in self._active:
+    async def close_if_spread_gone(self, key: tuple) -> bool:
+        """§12.4 — immediate expiry when the route no longer clears the profit gates.
+
+        Called by the engine when an *active* route's fresh candidate is rejected as
+        BELOW_MIN_PROFIT / UNPROFITABLE_AFTER_FEES — i.e. the opportunity has collapsed
+        below the publishable threshold (not necessarily to net <= 0). No-op when the
+        key has no active signal.
+        """
+        if key in self._active:
             await self.expire(key, ExpiryReason.SPREAD_CLOSED)
             return True
         return False

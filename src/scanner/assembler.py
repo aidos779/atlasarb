@@ -16,6 +16,7 @@ from src.domain.enums import ArbitrageType, RejectReason
 from src.domain.market import OrderBook
 from src.domain.ports import ExchangeAdapter, GasPriceProvider
 from src.domain.signal import Candidate, FundingSnapshot, Signal
+from src.scanner import mathx
 from src.scanner.cache.market_state_cache import MarketStateCache
 from src.scanner.liquidity.analyzer import LiquidityAnalyzer
 from src.scanner.priority.scheduler import PriorityClassifier, profit_reference_for
@@ -63,7 +64,47 @@ def _charges_flat_taker_fee(venue_type: str) -> bool:
     pipeline (_resolve_fees) — the two must never disagree about what a leg costs.
     """
     return venue_type != _DEX
-_DEFAULT_HISTORICAL_RELIABILITY = Decimal(60)
+_DEFAULT_HISTORICAL_RELIABILITY = Decimal(60)  # fallback when no reliability provider
+
+
+def _dispersion_pct(window: list[Decimal]) -> Decimal | None:
+    """Robust relative price dispersion: MAD / |median| × 100 (percent).
+
+    None = not enough history to judge (< 3 samples) — callers treat that as missing
+    evidence (weight redistribution / missing-data penalty), never as perfect stability.
+    """
+    if len(window) < 3:
+        return None
+    med = mathx.robust_median(window)
+    if med == 0:
+        return None
+    return mathx.mad(window, med) / abs(med) * Decimal(100)
+
+
+def _worst_dispersion_pct(buy_window: list[Decimal],
+                          sell_window: list[Decimal]) -> Decimal | None:
+    """Worse (higher) of the two legs' price dispersions; partial evidence is used
+    as-is, None only when neither leg has enough history."""
+    values = [d for d in (_dispersion_pct(buy_window), _dispersion_pct(sell_window))
+              if d is not None]
+    return max(values) if values else None
+
+
+def _spread_stability(dispersion_pct: Decimal | None, gross_spread_pct: Decimal) -> Decimal:
+    """§11.5 spread-stability factor, 0..100 — persistence of the spread, not tick count.
+
+    A spread smaller than the legs' own price noise can vanish within one fluctuation:
+    the factor is the fraction of the spread that survives the observed dispersion,
+    ``clamp(1 − dispersion/spread) × 100``. Dispersion is the worse leg's robust
+    MAD/median (see _dispersion_pct). No history yet → conservative 50, the same
+    missing-data penalty the funding stability factor applies.
+    """
+    if dispersion_pct is None:
+        return Decimal(50)
+    if gross_spread_pct <= 0:
+        return Decimal(0)
+    ratio = dispersion_pct / gross_spread_pct
+    return max(Decimal(0), Decimal(1) - min(ratio, Decimal(1))) * Decimal(100)
 
 
 class AssemblyResult:
@@ -96,6 +137,7 @@ class SignalAssembler:
         self._liquidity = LiquidityAnalyzer(config)
         self._confidence = ConfidenceScorer(config)
         self._ranker = RankingEngine(config)
+        self._validator = SignalValidator(config)
         self._reliability = reliability_provider
         # Cached immutable venue taker-fee *rates* (§8.3). taker_fee() is a per-venue
         # constant for every current adapter, so memoize it once and reuse it in the
@@ -105,8 +147,14 @@ class SignalAssembler:
 
     def update_config(self, config: ScannerConfig) -> None:
         self._config = config
-        for comp in (self._profit, self._liquidity, self._confidence, self._ranker):
+        for comp in (self._profit, self._liquidity, self._confidence, self._ranker,
+                     self._validator):
             comp.update_config(config)
+        # Fee-rate memo is config-derived state: a runtime override of
+        # cex_taker_fee_by_venue must not keep serving pre-reload rates. (Adapters read
+        # their rate at construction — a rate override still needs a restart to reach
+        # them; the memo clear keeps this cache from adding a second staleness layer.)
+        self._fee_rate_cache.clear()
 
     def _fee_rate(self, venue: str) -> Decimal | None:
         """Memoized taker-fee rate for a venue (fraction, e.g. 0.001). None if the
@@ -204,19 +252,26 @@ class SignalAssembler:
 
         priority = self._priority.priority(cand.base_asset)
         reference = profit_reference_for(priority)
+        # Depth normalization uses the *liquidity* reference scale, not the profit one:
+        # normalizing USD depth against the $500/$200/$50 profit references saturated
+        # the depth factor at trivially small books (§9.4 fix).
+        liq_reference = Decimal(str(self._config.liquidity_reference_usd(priority)))
         liquidity_usd = self._liquidity.liquidity_usd(
             buy_leg, sell_leg, cand.buy_leg.venue_type, cand.sell_leg.venue_type
         )
+        # Recent price history of both legs — reused for liquidity stability, the
+        # spread-stability confidence factor and the price_source_count provenance.
+        buy_window = self._cache.price_window(cand.buy_leg.venue, pair)
+        sell_window = self._cache.price_window(cand.sell_leg.venue, pair)
+        dispersion = _worst_dispersion_pct(buy_window, sell_window)
         liq_score = self._liquidity.score(
-            buy_leg, sell_leg, cand.buy_leg.venue_type, cand.sell_leg.venue_type, reference
+            buy_leg, sell_leg, cand.buy_leg.venue_type, cand.sell_leg.venue_type,
+            liq_reference, dispersion,
         )
 
         warmed = (self._cache.is_warmed_up(cand.buy_leg.venue, pair)
                   and self._cache.is_warmed_up(cand.sell_leg.venue, pair))
-        # Computed once and reused by the risk inputs, the confidence inputs and the
-        # signal: price_window() materializes a new list from the rolling deque on every
-        # call, and this was calling it three times with identical arguments.
-        price_window_len = len(self._cache.price_window(cand.buy_leg.venue, pair))
+        price_window_len = len(buy_window)
         # Also stable for this candidate; it drove three separate calls below.
         floor_venue_type = self._floor_venue_type(cand)
 
@@ -231,13 +286,12 @@ class SignalAssembler:
         ))
 
         conf = self._confidence.score(self._confidence_inputs(
-            cand, buy_book, sell_book, liq_score, breakdown, warmed, pair,
-            price_window_len))
+            cand, buy_book, sell_book, liq_score, breakdown, dispersion))
 
         # One RankInputs, used for both the score and the tier. The two calls were
         # building byte-identical instances; RankInputs is read-only to both.
         rank_inputs = RankInputs(
-            net_profit_usd=breakdown.net_profit_usd, roi_pct=breakdown.roi_pct,
+            net_profit_usd=breakdown.net_profit_usd,
             profit_reference_usd=reference, liquidity_score=liq_score,
             confidence_score=Decimal(conf), risk=risk, arb_type=cand.arb_type,
             bridge_time_sec=cand.bridge_time_sec, warmed_up=warmed,
@@ -268,7 +322,7 @@ class SignalAssembler:
             has_bridge_route=cand.bridge_name is not None
             if cand.arb_type == ArbitrageType.CROSS_CHAIN else True,
         )
-        verdict = SignalValidator(self._config).validate(vctx)
+        verdict = self._validator.validate(vctx)
         if not verdict.ok:
             # Gated: _log_rejection runs seven Decimal divisions plus rounds/float
             # conversions to build its fields. Rejections are the common case, so at
@@ -308,13 +362,15 @@ class SignalAssembler:
         sym = CanonicalSymbol(cand.base_asset, cand.quote_asset, VenueType.CEX)
         fees_usd = size * (buy_ad.taker_fee(sym) + sell_ad.taker_fee(sym))
         net = gross - fees_usd
+        # Cheap pre-gate (mirrors the spot fee-floor pre-gate): a non-positive carry can
+        # never publish, so skip the liquidity/confidence/risk pipeline. All threshold
+        # gates (min net / min ROI / confidence / status / freshness) run in the shared
+        # SignalValidator below — funding follows the same §10 path as every other type.
         if net <= 0:
             return AssemblyResult(None, RejectReason.UNPROFITABLE_AFTER_FEES)
         # capitalDeployed = both legs' margin (§8.10); assume 2x notional hedged.
         capital = size * Decimal(2)
         roi = net / capital * Decimal(100)
-        if net < Decimal(str(self._config.min_net_profit_usd)):
-            return AssemblyResult(None, RejectReason.BELOW_MIN_PROFIT)
         from src.domain.signal import ProfitBreakdown, SizingProfile
         breakdown = ProfitBreakdown(
             size_usd=size, gross_profit_usd=gross, trading_fees_usd=fees_usd,
@@ -327,22 +383,50 @@ class SignalAssembler:
         )
         sizing = SizingProfile(size, capital, size, capital, [(Decimal(100), roi)])
         conf = self._funding_confidence(cand)
+        pair = f"{cand.base_asset}/{cand.quote_asset}"
+        liquidity_usd, liq_score = self._funding_liquidity(cand, pair)
         risk = classify_risk(RiskInputs(
-            arb_type=ArbitrageType.FUNDING, liquidity_usd=capital,
+            arb_type=ArbitrageType.FUNDING, liquidity_usd=liquidity_usd,
             liquidity_floor=Decimal(str(self._config.min_liquidity_cex_usd)),
             cross_network_transfer=False, bridge_time_sec=None,
             atomic_execution=False,
         ))
         reference = profit_reference_for(self._priority.priority(cand.base_asset))
         rank_inputs = RankInputs(
-            net_profit_usd=net, roi_pct=roi, profit_reference_usd=reference,
-            liquidity_score=Decimal(70), confidence_score=Decimal(conf), risk=risk,
+            net_profit_usd=net, profit_reference_usd=reference,
+            liquidity_score=liq_score, confidence_score=Decimal(conf), risk=risk,
             arb_type=ArbitrageType.FUNDING, bridge_time_sec=None, warmed_up=True,
             funding_projected_profit=net,
         )
         score = self._ranker.composite_score(rank_inputs)
         tier = self._ranker.assign_tier(score, rank_inputs)
-        signal = self._build_signal(cand, breakdown, sizing, capital, risk, conf,
+
+        # Same §10 gates as every other arbitrage type — funding no longer bypasses the
+        # validator. Funding-specific inputs: staleness is the age of the exact funding
+        # snapshots that formed the candidate against the funding freshness horizon;
+        # warmed_up=True because §3.1 warm-up is an order-book bootstrap guard — funding
+        # data quality is instead scored by the funding confidence model (freshness /
+        # rate-stability / completeness), which Gate 7 now actually enforces.
+        now = time.time()
+        vctx = ValidationContext(
+            breakdown=breakdown, sizing=sizing, liquidity_usd=liquidity_usd,
+            liquidity_score=liq_score, confidence_score=conf,
+            buy_status=self._health.status(cand.buy_leg.venue),
+            sell_status=self._health.status(cand.sell_leg.venue),
+            max_data_staleness_sec=max(now - cand.funding_low.received_at,
+                                       now - cand.funding_high.received_at),
+            max_allowed_staleness_sec=self._config.max_age_funding_sec,
+            venue_type_for_floor="CEX",
+            token_verified=True, warmed_up=True,
+            gas_fee_usd=Decimal(0), gross_profit_usd=gross,
+        )
+        verdict = self._validator.validate(vctx)
+        if not verdict.ok:
+            if debug_enabled():
+                self._log_rejection(cand, breakdown, sizing, verdict.reason)
+            return AssemblyResult(None, verdict.reason)
+
+        signal = self._build_signal(cand, breakdown, sizing, liquidity_usd, risk, conf,
                                     tier, score, True)
         signal.funding_annualized_spread = annualized
         signal.funding_next_time = cand.funding_next_time
@@ -352,6 +436,41 @@ class SignalAssembler:
         signal.funding_sell_annualized = cand.funding_sell_annualized
         signal.funding_hold_hours = self._config.funding_hold_hours
         return AssemblyResult(signal, None)
+
+    def _funding_liquidity(self, cand: Candidate, pair: str) -> tuple[Decimal, Decimal]:
+        """(liquidity_usd, liquidity_score) for a funding signal — real data first.
+
+        Perp order books are not collected, so when both venues carry a fresh *spot*
+        book for the asset, its executable depth is used as the liquidity proxy (real,
+        live data; spot and perp depth on the same venue are strongly correlated).
+        Without books there is no depth evidence either way: the neutral baseline pins
+        both values exactly at their §9/§10 floors — the gates pass by definition
+        (absence of evidence is not evidence of illiquidity for a fixed $1k
+        delta-neutral position), but the signal earns zero ranking credit.
+
+        Proxy evidence is *monotone*: it can only raise the values above the neutral
+        baseline, never below it. The perp carry does not execute on the spot book, so
+        a thin spot book must not out-reject the no-book case (worse evidence would
+        otherwise pass more easily than better evidence). A deep spot book still earns
+        the full ranking credit it proves.
+        """
+        floor_usd = Decimal(str(self._config.min_liquidity_cex_usd))
+        floor_score = Decimal(str(self._config.liquidity_score_floor))
+        buy_book = self._cache.get_book(cand.buy_leg.venue, pair)
+        sell_book = self._cache.get_book(cand.sell_leg.venue, pair)
+        if buy_book is not None and sell_book is not None:
+            buy_leg = CexBookLeg(buy_book, "buy")
+            sell_leg = CexBookLeg(sell_book, "sell")
+            liquidity_usd = self._liquidity.liquidity_usd(buy_leg, sell_leg, "CEX", "CEX")
+            liq_reference = Decimal(str(self._config.liquidity_reference_usd(
+                self._priority.priority(cand.base_asset))))
+            dispersion = _worst_dispersion_pct(
+                self._cache.price_window(cand.buy_leg.venue, pair),
+                self._cache.price_window(cand.sell_leg.venue, pair))
+            score = self._liquidity.score(buy_leg, sell_leg, "CEX", "CEX",
+                                          liq_reference, dispersion)
+            return max(liquidity_usd, floor_usd), max(score, floor_score)
+        return floor_usd, floor_score
 
     def _funding_confidence(self, cand: Candidate) -> int:
         """Live funding confidence (§11.5) — derived entirely from real data, no constant
@@ -447,8 +566,21 @@ class SignalAssembler:
         requires_bridge = arb == ArbitrageType.CROSS_CHAIN
 
         withdrawal_usd: Decimal | None = Decimal(0)
-        if requires_withdrawal and buy_ad is not None:
-            withdrawal_usd = buy_ad.withdrawal_fee_usd(cand.base_asset, cand.buy_leg.network)
+        if requires_withdrawal:
+            if cand.buy_leg.venue_type != _DEX:
+                # Buy on CEX: the purchased base asset is withdrawn toward the sell leg.
+                withdrawal_usd = (buy_ad.withdrawal_fee_usd(cand.base_asset,
+                                                            cand.buy_leg.network)
+                                  if buy_ad else None)
+            else:
+                # Buy on DEX, sell on CEX: proceeds land on the CEX; per the project's
+                # round-trip model (symmetric with the CEX_CEX/CEX_DEX buy-CEX case)
+                # returning the capital on-chain costs one quote-asset withdrawal from
+                # the sell venue. Previously this direction charged 0 (the DEX adapter's
+                # withdrawal fee) — an asymmetry, not a different trading model.
+                withdrawal_usd = (sell_ad.withdrawal_fee_usd(cand.quote_asset,
+                                                             cand.buy_leg.network)
+                                  if sell_ad else None)
 
         gas_usd: Decimal | None = Decimal(0)
         if requires_gas:
@@ -486,15 +618,13 @@ class SignalAssembler:
         return total
 
     def _confidence_inputs(self, cand, buy_book, sell_book, liq_score, breakdown,
-                           warmed, pair: str, price_window_len: int) -> ConfidenceInputs:
+                           dispersion: Decimal | None) -> ConfidenceInputs:
         max_age = self._config.max_age_orderbook_cex_sec
         fresh = min(
             Decimal(1) - Decimal(str(min(buy_book.staleness(), max_age))) / Decimal(str(max_age)),
             Decimal(1) - Decimal(str(min(sell_book.staleness(), max_age))) / Decimal(str(max_age)),
         ) * Decimal(100)
-        stability = min(Decimal(100),
-                        Decimal(price_window_len) / Decimal(self._config.outlier_window_ticks)
-                        * Decimal(100))
+        stability = _spread_stability(dispersion, breakdown.gross_spread_pct)
         health = min(self._health.health_factor(cand.buy_leg.venue),
                      self._health.health_factor(cand.sell_leg.venue))
         reliability = _DEFAULT_HISTORICAL_RELIABILITY

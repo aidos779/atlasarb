@@ -114,3 +114,43 @@ async def test_concurrent_cooldown_writers_do_not_raise(database):
     async with database.session() as s:
         row = await NotificationRepository(s).get_cooldown(89, "BTC/USDT|binance|okx")
     assert row is not None                       # exactly one row, not five
+
+
+# ── §11.5 type_reliability metric (production-review fix E1) ─────────────────────────
+
+def _hist_signal(i, expiry_reason, lifetime_sec):
+    from decimal import Decimal
+    from src.domain.enums import ArbitrageType
+    s = Signal(arb_type=ArbitrageType.CEX_CEX, coin="ETH", trading_pair="ETH/USDT",
+               buy_exchange="binance", sell_exchange="okx",
+               buy_price=Decimal("1"), sell_price=Decimal("1"))
+    s.id = f"rel-{i}"
+    s.expiry_reason = expiry_reason
+    now = datetime.now(UTC)
+    s.timestamp = (now - timedelta(seconds=lifetime_sec)).timestamp()
+    s.expired_at = now.timestamp()
+    return s
+
+
+async def test_reliability_counts_arbitraged_away_spreads_as_success(database):
+    """SPREAD_CLOSED after a plausible lifetime = a real opportunity that got traded —
+    it must NOT count against the route (the old metric suppressed exactly the
+    most-executed real routes)."""
+    async with database.session() as s:
+        repo = HistoryRepository(s)
+        for i, (reason, life) in enumerate([
+            ("TTL_EXCEEDED", 120),      # held to TTL          -> good
+            ("SPREAD_CLOSED", 45),      # traded away          -> good (was: bad)
+            ("SPREAD_CLOSED", 2),       # phantom instant close -> bad
+            ("VENUE_OFFLINE", 30),      # venue failure         -> bad
+        ]):
+            await repo.archive_signal(_hist_signal(i, reason, life))
+    async with database.session() as s:
+        rel = await HistoryRepository(s).type_reliability("CEX_CEX", "binance", "okx")
+    assert rel == 50.0   # 2 good of 4; old metric would have said 25.0
+
+
+async def test_reliability_defaults_without_history(database):
+    async with database.session() as s:
+        rel = await HistoryRepository(s).type_reliability("CEX_CEX", "nowhere", "never")
+    assert rel == 60.0
