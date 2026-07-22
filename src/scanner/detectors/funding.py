@@ -44,18 +44,33 @@ class FundingDetector(Detector):
         if lead < _MIN_LEAD_SEC:
             return []  # not actionable before settlement
 
-        annualized_spread = high.annualized() - low.annualized()
-        if annualized_spread < ctx.funding_min_annualized_spread:
-            self.counters.rejected_by_spread += 1
+        low_annualized = low.annualized()
+        high_annualized = high.annualized()
+        annualized_spread = high_annualized - low_annualized
+        # Economically-derived floor (§ Phase 3): the carry over the holding horizon must
+        # clear the round-trip taker fee AND the minimum net profit — the assembler's exact
+        # funding publish condition, solved for the annualized rate. Replaces the fixed
+        # noise threshold; drops only carries the assembler would reject anyway. Falls back
+        # to funding_min_annualized_spread as an absolute floor.
+        breakeven = ctx.funding_breakeven_annualized(low.venue, high.venue)
+        if annualized_spread < breakeven and not ctx.is_active_route(
+                ArbitrageType.FUNDING.value, base_asset, quote_asset,
+                low.venue, high.venue, None):
+            self.counters.rejected_economic += 1
             return []
 
-        # Reference "price" for legs = current funding rate (informational).
+        # Leg prices are a required Decimal on LegRef, but a funding carry has no spot
+        # price — Decimal(1) is a sentinel that must never reach a user surface or be read
+        # as a price (the formatter renders the funding rates below instead). The per-leg
+        # annualized rates are retained ×100 (PERCENT) purely for presentation.
         return [Candidate(
             arb_type=ArbitrageType.FUNDING, base_asset=base_asset, quote_asset=quote_asset,
-            buy_leg=LegRef(low.venue, "CEX", Decimal(1)),   # long low-funding
-            sell_leg=LegRef(high.venue, "CEX", Decimal(1)),  # short high-funding
+            buy_leg=LegRef(low.venue, "CEX", Decimal(1)),   # long low-funding (sentinel price)
+            sell_leg=LegRef(high.venue, "CEX", Decimal(1)),  # short high-funding (sentinel price)
             gross_spread_pct=annualized_spread * Decimal(100),
             funding_annualized_spread=annualized_spread,
+            funding_buy_annualized=low_annualized * Decimal(100),
+            funding_sell_annualized=high_annualized * Decimal(100),
             funding_next_time=min(low.next_funding_time, high.next_funding_time),
             funding_low=self._snapshot(ctx, low),
             funding_high=self._snapshot(ctx, high),

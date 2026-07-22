@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import aiohttp
 
-from src.config import LogThrottle, describe_exc, get_logger
+from src.config import LogThrottle, describe_exc, get_logger, redact_url
 from src.config.scanner_config import ScannerConfig
 from src.config.settings import Settings
 from src.domain.enums import ExchangeStatus, VenueType
@@ -241,7 +241,7 @@ class BaseDexAdapter(ExchangeAdapter):
                             break
                         self._rpc_pool.record_failure(url, kind)  # type: ignore[arg-type]
                         last_err = detail
-                        log.debug("rpc_failover", network=self.network, url=url,
+                        log.debug("rpc_failover", network=self.network, url=redact_url(url),
                                   kind=kind.value if kind else "?", error=detail)
                     if winner is not None:
                         break

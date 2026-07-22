@@ -36,6 +36,12 @@ class LifecycleManager:
     def active_signals(self) -> list[Signal]:
         return list(self._active.values())
 
+    def active_route_keys(self):
+        """Live keys-view of the active-signal dedup keys (read-only). Used by the detector
+        economic floor to exempt active routes so §12.4 spread-collapse expiry is preserved.
+        A view, not a copy: it reflects admits/expiries without per-tick rebuilding."""
+        return self._active.keys()
+
     def get_active(self, key: tuple) -> Signal | None:
         return self._active.get(key)
 

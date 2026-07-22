@@ -71,6 +71,17 @@ class CexCexDetector(Detector):
                             ceiling_pct=float(ceiling), repeats_suppressed=suppressed)
             return []
 
+        # Detector-side economic floor (§ Phase 3): a spread that cannot clear the round-
+        # trip taker fee + min ROI is a guaranteed assembler reject at every size — drop it
+        # before building the Candidate (the assembler pre-gate remains the final net).
+        if not ctx.clears_economic_floor(gross, best_buy_venue, "CEX",
+                                         best_sell_venue, "CEX", quote_asset):
+            if not ctx.is_active_route(ArbitrageType.CEX_CEX.value, base_asset,
+                                       quote_asset, best_buy_venue, best_sell_venue, None):
+                self.counters.rejected_economic += 1
+                return []
+            # Active route — keep so the assembler can trigger §12.4 spread-collapse expiry.
+
         buy_leg = LegRef(venue=best_buy_venue, venue_type="CEX", price=best_ask)
         sell_leg = LegRef(venue=best_sell_venue, venue_type="CEX", price=best_bid)
         return [Candidate(

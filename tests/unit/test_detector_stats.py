@@ -30,6 +30,9 @@ def test_empty_report_is_all_zero() -> None:
     assert _stats().report_and_reset()["funding"] == {
         "checked": 0, "candidates": 0, "published": 0, "rejected_spread": 0,
         "rejected_fees": 0, "rejected_liquidity": 0, "rejected_validation": 0,
+        "rejected_economic": 0, "rejected_bridge": 0,
+        "asm_rejected_spread": 0, "asm_rejected_fees": 0,
+        "asm_rejected_liquidity": 0, "asm_rejected_validation": 0,
     }
 
 
@@ -61,7 +64,10 @@ def test_candidates_and_publishes_are_attributed_by_arb_type() -> None:
     assert report["cex_cex"]["candidates"] == 0
 
 
-def test_reject_reasons_map_to_the_four_buckets() -> None:
+def test_reject_reasons_map_to_the_assembler_buckets() -> None:
+    # record_rejection attributes ASSEMBLER-side rejects (a candidate the detector emitted
+    # that the downstream pipeline dropped) to the asm_rejected_* columns — kept separate
+    # from the detector's own pre-candidate drops so the two never double-count.
     stats = _stats()
     cex_cex = ArbitrageType.CEX_CEX.value
     for reason in ("BELOW_MIN_PROFIT", "IMPLAUSIBLE_SPREAD"):
@@ -75,16 +81,20 @@ def test_reject_reasons_map_to_the_four_buckets() -> None:
 
     counters = stats.report_and_reset()["cex_cex"]
 
-    assert counters["rejected_spread"] == 2
-    assert counters["rejected_fees"] == 3
-    assert counters["rejected_liquidity"] == 1
-    assert counters["rejected_validation"] == 2
+    assert counters["asm_rejected_spread"] == 2
+    assert counters["asm_rejected_fees"] == 3
+    assert counters["asm_rejected_liquidity"] == 1
+    assert counters["asm_rejected_validation"] == 2
+    # Detector-side columns are untouched by assembler attribution.
+    assert counters["rejected_spread"] == 0
+    assert counters["rejected_fees"] == 0
+    assert counters["rejected_validation"] == 0
 
 
 def test_unknown_reject_reason_counts_as_validation() -> None:
     stats = _stats()
     stats.record_rejection(ArbitrageType.CEX_DEX.value, "SOME_FUTURE_REASON")
-    assert stats.report_and_reset()["cex_dex"]["rejected_validation"] == 1
+    assert stats.report_and_reset()["cex_dex"]["asm_rejected_validation"] == 1
 
 
 def test_unknown_arb_type_is_ignored_not_raised() -> None:
@@ -111,6 +121,9 @@ def test_counters_reset_after_each_report() -> None:
     assert second["cex_cex"] == {
         "checked": 0, "candidates": 0, "published": 0, "rejected_spread": 0,
         "rejected_fees": 0, "rejected_liquidity": 0, "rejected_validation": 0,
+        "rejected_economic": 0, "rejected_bridge": 0,
+        "asm_rejected_spread": 0, "asm_rejected_fees": 0,
+        "asm_rejected_liquidity": 0, "asm_rejected_validation": 0,
     }
 
 
@@ -170,6 +183,9 @@ def test_stats_screen_lists_every_detector_and_sums_rejections() -> None:
     for heading in ("CEX↔CEX", "CEX↔DEX", "DEX↔DEX", "Funding", "Cross-chain"):
         assert heading in text
     assert "Engine Statistics (last minute)" in text
-    assert "Rejected: 2" in text  # 1 spread + 1 liquidity
+    # record_rejection is assembler-side, so it lands under Assembler-rejected, not the
+    # detector-dropped column (which stays 0 here).
+    assert "Assembler-rejected: 2" in text  # 1 spread + 1 liquidity
+    assert "Detector-dropped: 0" in text
     assert "- spread 1" in text
     assert "- liquidity 1" in text

@@ -191,3 +191,23 @@ def describe_exc(exc: BaseException) -> str:
     message = str(exc).strip()
     name = type(exc).__name__
     return f"{name}: {message}" if message else name
+
+
+def redact_url(url: str) -> str:
+    """Strip credentials from a provider URL for safe logging.
+
+    RPC provider URLs embed API keys as a path segment (``…/v2/<key>``) or a query param
+    (``?apikey=<key>``). Log the scheme + host only, with a ``/…`` marker when a path/query
+    was present, so the provider is still identifiable (and the ``network`` is logged as a
+    separate field) but no key/token/credential can leak. Non-URL inputs are returned
+    unchanged; anything unparseable collapses to ``***``.
+    """
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "***"
+    if not parts.scheme or not parts.netloc:
+        return url  # not a full URL (e.g. a bare host) — no embedded secret to strip
+    tail = "/…" if (parts.path not in ("", "/") or parts.query) else ""
+    return f"{parts.scheme}://{parts.netloc}{tail}"

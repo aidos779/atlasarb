@@ -31,6 +31,10 @@ from src.scanner import mathx
 log = get_logger("scanner.cache")
 
 CacheEvent = Callable[[str, str, str], None]  # (base_asset, quote_asset, venue)
+# Funding updates carry no quote (perp funding is keyed by base only), so they use a
+# dedicated channel — (base_asset, venue) — kept separate from the price/book CacheEvent
+# so the existing 3-arg subscriber contract is unchanged (backwards compatible).
+FundingEvent = Callable[[str, str], None]  # (base_asset, venue)
 
 
 class MarketStateCache:
@@ -57,6 +61,7 @@ class MarketStateCache:
         # every WS price write via _cross_venue_suspect.
         self._venues_by_pair: dict[str, set[str]] = defaultdict(set)
         self._listeners: list[CacheEvent] = []
+        self._funding_listeners: list[FundingEvent] = []
         self._suspect: dict[tuple[str, str], bool] = {}           # cross-venue flag
         self.rejected_prices = 0
         self.outliers = 0
@@ -67,6 +72,14 @@ class MarketStateCache:
 
     def subscribe(self, listener: CacheEvent) -> None:
         self._listeners.append(listener)
+
+    def subscribe_funding(self, listener: FundingEvent) -> None:
+        """Register a (base, venue) callback fired on every accepted funding write.
+
+        Separate from ``subscribe`` so funding updates can drive the funding detector
+        directly (§7.4) instead of only being re-evaluated opportunistically when an
+        unrelated CEX book write for the same symbol happens to arrive."""
+        self._funding_listeners.append(listener)
 
     def track(self, venue: str, symbol: CanonicalSymbol) -> None:
         # Non-USDT quotes (§3.6) never earn a cache slot. upsert_price/upsert_book both
@@ -146,6 +159,10 @@ class MarketStateCache:
         key = (funding.venue, funding.base_asset)
         self._funding[key] = funding
         self._funding_windows[key].append(funding.current_rate)
+        # Drive the funding detector off the funding feed itself (§7.4), rather than
+        # leaving funding candidates to be recomputed only when a CEX price/book write
+        # for the same symbol happens to fire.
+        self._emit_funding(funding.base_asset, funding.venue)
 
     def funding_window(self, venue: str, base_asset: str) -> list[Decimal]:
         """Recent funding-rate history for one (venue, base) — for the confidence
@@ -260,3 +277,7 @@ class MarketStateCache:
     def _emit(self, base: str, quote: str, venue: str) -> None:
         for listener in self._listeners:
             listener(base, quote, venue)
+
+    def _emit_funding(self, base: str, venue: str) -> None:
+        for listener in self._funding_listeners:
+            listener(base, venue)

@@ -80,6 +80,23 @@ class ScannerConfig:
     ambiguous_tickers: frozenset[str] = frozenset({"AI"})
     stablecoin_crossquote_bps: float = 3.0     # §8.9 default conversion cost
 
+    # ── Detector-side economic floor (Phase 3) ──
+    # Detectors reject economically-impossible opportunities BEFORE creating a Candidate,
+    # using the same size-independent lower bound the assembler pre-gate uses (round-trip
+    # taker rate + conversion + min_roi). This is a strict lower bound on the assembler's
+    # publish condition, so it can only skip candidates the assembler would also reject —
+    # never a publishable one. The assembler pre-gate stays as the final safety net.
+    detector_economic_floor_enabled: bool = True
+    # Fixed USD costs (gas, bridge) are amortized into a % term over this reference
+    # notional. It must be >= any real saturation size so the % term stays a strict LOWER
+    # bound (a smaller notional could over-charge a fixed cost and wrongly reject a
+    # candidate a deep-liquidity fill would have published). Large by design; tune down
+    # only with measurement. 0 disables the fixed-cost term entirely.
+    detector_cost_amortization_usd: float = 1_000_000.0
+    # Conservative (low) static gas estimate for DEX-leg detectors, which have no live gas
+    # provider. Deliberately low so the floor never over-charges gas (safe direction).
+    detector_gas_estimate_usd: float = 1.0
+
     # ── Bridge / cross-chain (§7.5) ──
     max_bridge_time_sec: int = 1200            # 20 min hard ceiling
     fast_bridge_threshold_sec: int = 120       # < 2 min -> eligible for TOP
@@ -218,7 +235,24 @@ class ScannerConfig:
     funding_min_annualized_spread: float = 0.05
 
     # ── Scheduling (§1.1, §1.6, §16) ──
-    reconciliation_interval_sec: float = 1.0   # safety-net max every 1s
+    reconciliation_interval_sec: float = 1.0   # safety-net max every 1s (sweep + health)
+    # ── Reconciliation detection cadence (Phase 4) ──
+    # The reconciliation sweep+health still fire every reconciliation_interval_sec, but each
+    # DETECTOR is re-scanned only every N seconds below — funding fastest, cross-chain
+    # slowest. The event path is authoritative and unaffected; these only bound how quickly
+    # the safety net catches a *missed* event, so they are the max additional detection
+    # latency per type. All configurable (§20). 0 disables cadence gating (scan every pass).
+    reconciliation_cadence_funding_sec: float = 1.0
+    reconciliation_cadence_cex_cex_sec: float = 2.0
+    reconciliation_cadence_cex_dex_sec: float = 2.0
+    reconciliation_cadence_dex_dex_sec: float = 5.0
+    reconciliation_cadence_cross_chain_sec: float = 10.0
+    # Yield-aware backoff: a detector that has published nothing for idle_after_sec has its
+    # reconciliation cadence multiplied by idle_backoff (capped by the multiplier itself),
+    # freeing CPU from cold detectors. It recovers to base cadence automatically on the next
+    # publish. Detectors are never disabled — only slowed. Max latency = base × idle_backoff.
+    reconciliation_idle_after_sec: float = 300.0
+    reconciliation_idle_backoff: float = 4.0
     detection_budget_ms: float = 500.0         # §16
     signal_gen_budget_ms: float = 200.0        # §16
     priority2_batch_window_ms: float = 50.0    # §1.6 micro-batch
@@ -282,6 +316,18 @@ _RANGES: dict[str, tuple[float, float]] = {
     "reconciliation_interval_sec": (0.1, 60.0),
     "max_bridge_time_sec": (1, 86400),
     "fast_bridge_threshold_sec": (1, 86400),
+    # Phase 3 — detector economic floor
+    "detector_cost_amortization_usd": (1.0, 1e12),
+    "detector_gas_estimate_usd": (0.0, 1e6),
+    # Phase 4 — reconciliation cadence (0 = every pass; upper bound keeps the safety net
+    # from degrading past a minute, preserving eventual consistency)
+    "reconciliation_cadence_funding_sec": (0.0, 60.0),
+    "reconciliation_cadence_cex_cex_sec": (0.0, 60.0),
+    "reconciliation_cadence_cex_dex_sec": (0.0, 60.0),
+    "reconciliation_cadence_dex_dex_sec": (0.0, 120.0),
+    "reconciliation_cadence_cross_chain_sec": (0.0, 300.0),
+    "reconciliation_idle_after_sec": (0.0, 86400.0),
+    "reconciliation_idle_backoff": (1.0, 100.0),
 }
 
 

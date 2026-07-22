@@ -101,16 +101,20 @@ def _cex(cache, venue, base, bid, ask):
                                 [BookLevel(Decimal(ask), Decimal("1000000"))]))
 
 
-def test_detector_still_emits_below_fee_floor_candidate():
-    """The detector-level fee-floor prune was removed because it duplicated the assembler
-    pre-gate and suppressed §12.4 spread-collapse expiry. A tiny (sub-fee) but positive
-    spread must therefore STILL produce a candidate — the assembler, not the detector,
-    decides it is unprofitable, and that reject is what expires a stale active signal."""
+def test_detector_prunes_below_floor_but_keeps_active_route():
+    """Phase 3: the detector economic floor prunes a sub-fee spread (a guaranteed assembler
+    reject) BEFORE Candidate creation — UNLESS the route has an active published signal, in
+    which case the candidate must still be emitted so the assembler's reject drives §12.4
+    spread-collapse expiry (the reason the earlier detector prune was reverted)."""
     cfg = ScannerConfig()
     ctx, cache = _cex_ctx(cfg)
-    # ~0.04% spread — below any realistic round-trip taker fee, but strictly positive.
+    # ~0.04% spread — below min ROI (0.15%), a guaranteed assembler reject.
     _cex(cache, "binance", "BTC", "100.00", "100.01")
     _cex(cache, "okx", "BTC", "100.04", "100.05")
+    # Non-active route → economically pruned at the detector (never publishable).
+    assert CexCexDetector().detect(ctx, "BTC", "USDT") == []
+    # Active route → exempt, still emitted so the assembler can expire the live signal.
+    ctx.active_routes = frozenset({("CEX_CEX", "BTC", "USDT", ("binance", "okx"), None)})
     out = CexCexDetector().detect(ctx, "BTC", "USDT")
     assert len(out) == 1
     assert Decimal("0") < out[0].gross_spread_pct < Decimal("1")

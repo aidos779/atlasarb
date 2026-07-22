@@ -27,9 +27,16 @@ no exchange-specific branching.
 ```
 Adapters (WS/REST/RPC)
    └─ normalize → Market State Cache  (invalid-price §4.5, outlier §4.6, warm-up §3.1)
-        └─ cache-write event → Priority Queue (§1.6)
-             └─ Generator worker → Detectors (§7, x5)
+        └─ typed cache-write event (price|book|funding) → Priority Queue (§1.6, coalesced)
+             └─ Generator worker → Detectors (§7) — TYPED ROUTING: only detectors whose
+                  │                                  input changed run (CEX write → cex_cex,
+                  │                                  cex_dex; DEX → dex_dex, cross_chain,
+                  │                                  cex_dex; funding → funding)
+                  └─ economic floor (§ detector): reject opportunities that cannot clear
+                  │    taker/gas/bridge + min-ROI BEFORE Candidate creation (active routes
+                  │    exempt, so §12.4 spread-collapse expiry is preserved)
                   └─ Candidate → Signal Assembler
+                       ├─ fee-floor pre-gate (final economic safety net)
                        ├─ Profit Engine (§8) — fees, slippage, sizing (§8.11/§8.12)
                        ├─ Liquidity Analyzer (§9)
                        ├─ Risk (§10.5) + Confidence (§11.5)
@@ -38,12 +45,17 @@ Adapters (WS/REST/RPC)
                             └─ Lifecycle Manager (§12) — new/update/expire + cooldown (§13)
                                  └─ NotificationQueue (EngineBridge) → SignalRegistry + NotificationService
 
-Reconciliation Scheduler (§1.5) ── every ≤1s ──▶ full-matrix re-scan + age sweep + health pass
+Reconciliation Scheduler (§1.5) ── every ≤1s ──▶ age sweep + health pass, plus a SMART
+   detection re-scan: only the working set (pairs that can currently form a candidate) ×
+   detectors that are both cadence-due (per-detector interval) and eligible.
 ```
 
-The **event-driven path** is primary (recalc scoped to the symbol an update touched). The
-**reconciliation pass** is a safety net that re-runs all detectors across the full matrix,
-sweeps age-based expiries, and runs passive staleness health checks.
+The **event-driven path** is authoritative (recalc scoped to the symbol *and* the input an
+update touched — typed routing). The **reconciliation pass** is a verification safety net:
+it scans only the eligible working set, runs each detector on its own cadence (funding
+fastest → cross-chain slowest) with yield-aware backoff for cold detectors, and still
+guarantees eventual detection of every opportunity within a bounded per-detector latency.
+Age sweeps (§12.4) and staleness health checks still run every ≤1s regardless of cadence.
 
 ## Bot ↔ Engine boundary
 

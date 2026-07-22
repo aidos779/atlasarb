@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from src.config import LogThrottle, get_logger
+from src.config import LogThrottle, get_logger, redact_url
 
 log = get_logger("adapter.rpc")
 
@@ -223,7 +223,7 @@ class RpcProviderPool:
         p.last_kind = None
         p.last_success_at = time.monotonic()
         if was_disabled:
-            log.info("rpc_provider_recovered", network=self.network, url=url,
+            log.info("rpc_provider_recovered", network=self.network, url=redact_url(url),
                      score=round(p.score, 3), latency_ms=round(p.latency_ms, 1))
 
     def record_failure(self, url: str, kind: RpcErrorKind) -> None:
@@ -249,7 +249,7 @@ class RpcProviderPool:
                 p.permanent = True
                 p.cooldown = _PERMANENT_COOLDOWN_SEC
                 p.disabled_until = now + _PERMANENT_COOLDOWN_SEC
-                log.warning("rpc_provider_retired", network=self.network, url=url,
+                log.warning("rpc_provider_retired", network=self.network, url=redact_url(url),
                             reason="unauthorized", detail="endpoint requires authentication")
             return
 
@@ -263,7 +263,7 @@ class RpcProviderPool:
             p.permanent = True
             p.cooldown = _PERMANENT_COOLDOWN_SEC
             p.disabled_until = now + _PERMANENT_COOLDOWN_SEC
-            log.warning("rpc_provider_retired", network=self.network, url=url,
+            log.warning("rpc_provider_retired", network=self.network, url=redact_url(url),
                         reason="repeated_failures", kind=kind.value,
                         fail_streak=p.fail_streak,
                         detail="endpoint dead — retired for process lifetime")
@@ -285,7 +285,7 @@ class RpcProviderPool:
             p.disabled_until = now + p.cooldown
             emit, suppressed = _disable_log_throttle.allow((self.network, url))
             if emit:
-                log.warning("rpc_provider_disabled", network=self.network, url=url,
+                log.warning("rpc_provider_disabled", network=self.network, url=redact_url(url),
                             kind=kind.value, fail_streak=p.fail_streak,
                             cooldown_sec=round(p.cooldown, 1), score=round(p.score, 3),
                             timeout_rate=round(p.timeout_rate, 3),
@@ -303,7 +303,7 @@ class RpcProviderPool:
         """Per-provider health for the exhaustion log / diagnostics."""
         now = time.monotonic() if now is None else now
         return [
-            {"url": p.url, "state": p.state(now).value, "score": round(p.score, 3),
+            {"url": redact_url(p.url), "state": p.state(now).value, "score": round(p.score, 3),
              "latency_ms": round(p.latency_ms, 1), "timeout_rate": round(p.timeout_rate, 3),
              "fail_streak": p.fail_streak, "permanent": p.permanent,
              "last_kind": p.last_kind.value if p.last_kind else None}

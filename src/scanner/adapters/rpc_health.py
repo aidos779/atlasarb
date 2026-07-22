@@ -15,7 +15,7 @@ import time
 
 import aiohttp
 
-from src.config import describe_exc, get_logger
+from src.config import describe_exc, get_logger, redact_url
 from src.config.scanner_config import ScannerConfig
 from src.config.settings import Settings
 from src.scanner.adapters.tls import ssl_context
@@ -77,7 +77,7 @@ async def log_startup_rpc_health(settings: Settings, config: ScannerConfig) -> N
         for r in sorted(endpoints, key=lambda e: (not e["alive"], e["latency_ms"])):
             emit = log.info if r["alive"] else log.warning
             emit("rpc_endpoint_health", network=net, alive=r["alive"],
-                 status=r["status"], latency_ms=r["latency_ms"], url=r["url"])
+                 status=r["status"], latency_ms=r["latency_ms"], url=redact_url(r["url"]))
         live = sum(1 for r in endpoints if r["alive"])
         log.info("rpc_startup_health_summary", network=net,
                  live=live, total=len(endpoints))

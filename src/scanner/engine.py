@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Collection
 from decimal import Decimal
 
 from src.config import LogThrottle, debug_enabled, describe_exc, get_logger
 from src.config.scanner_config import ScannerConfig
-from src.domain.enums import ExchangeStatus, ExpiryReason
+from src.domain.enums import ArbitrageType, ExchangeStatus, ExpiryReason, VenueType
 from src.domain.ports import (
     ExchangeAdapter,
     GasPriceProvider,
@@ -37,6 +38,7 @@ from src.scanner.lifecycle.manager import LifecycleManager
 from src.scanner.monitoring.detector_stats import DetectorStats
 from src.scanner.monitoring.metrics import Metrics
 from src.scanner.priority.scheduler import PriorityClassifier, PriorityEventQueue
+from src.scanner.reconciliation.cadence import DetectorReconciliationCadence
 from src.scanner.reconciliation.scheduler import ReconciliationScheduler
 from src.scanner.status.health_registry import HealthRegistry
 
@@ -45,6 +47,11 @@ log = get_logger("scanner.engine")
 # A detector that starts throwing does so for every cache write — aggregate the
 # identical warnings instead of emitting one per tick.
 _detector_log_throttle = LogThrottle(interval_sec=60.0)
+
+# The event worker must survive any failure in the detection/assembly/lifecycle path (a bad
+# candidate, a raising adapter/gas provider, a lifecycle edge). Throttle the diagnostic so a
+# systemic failure logs periodically (with a suppressed count) instead of flooding.
+_generator_log_throttle = LogThrottle(interval_sec=60.0)
 
 # A sustained network outage stays down across many status ticks — throttle the escalated
 # alert so it fires periodically (with a suppressed count), not every minute.
@@ -58,6 +65,29 @@ _rpc_down_throttle = LogThrottle(interval_sec=300.0)
 # gap explicitly regardless of per-symbol cost, while paying the reschedule cost only
 # ~200×/s instead of once per symbol (~1M×/s), which would cut hot-loop throughput.
 _YIELD_BUDGET_SEC = 0.005
+
+# ── typed event routing (§1.4) ──────────────────────────────────────────────────────
+# A cache write only changes one venue's data, so it can only open (or close) an
+# opportunity for the detectors that read that venue type. Running all five detectors on
+# every write recomputed dex_dex/cross_chain on CEX ticks and funding on both — pure waste
+# (prod: ~1.15B detect() calls over 24h, most over unchanged inputs). Each event is tagged
+# with a group and only the detectors triggered by that group run.
+_GROUP_CEX = "cex"
+_GROUP_DEX = "dex"
+_GROUP_FUNDING = "funding"
+_ALL_GROUPS: frozenset[str] = frozenset({_GROUP_CEX, _GROUP_DEX, _GROUP_FUNDING})
+# Which market-data groups trigger each detector. cex_dex reads both legs, so a change to
+# either the CEX or the DEX side must re-run it.
+_DETECTOR_TRIGGERS: dict[str, frozenset[str]] = {
+    ArbitrageType.CEX_CEX.value: frozenset({_GROUP_CEX}),
+    ArbitrageType.CEX_DEX.value: frozenset({_GROUP_CEX, _GROUP_DEX}),
+    ArbitrageType.DEX_DEX.value: frozenset({_GROUP_DEX}),
+    ArbitrageType.CROSS_CHAIN.value: frozenset({_GROUP_DEX}),
+    ArbitrageType.FUNDING.value: frozenset({_GROUP_FUNDING}),
+}
+# Perp funding is USDT-quoted; §3.6 admits no other quote to the cache (is_supported_quote),
+# so a funding update maps to the (base, USDT) event key the rest of the pipeline uses.
+_FUNDING_QUOTE = "USDT"
 
 
 class ScanningEngine:
@@ -103,6 +133,18 @@ class ScanningEngine:
             CexCexDetector(), CexDexDetector(), DexDexDetector(),
             CrossChainDetector(self._bridges), FundingDetector(),
         ]
+        # Precomputed (detector, triggering-groups) pairs so the hot loop routes without a
+        # per-tick dict lookup. Aligned with self._detectors; every detector's arb_type is
+        # in _DETECTOR_TRIGGERS.
+        self._detector_trigger: list[tuple[Detector, frozenset[str]]] = [
+            (d, _DETECTOR_TRIGGERS[d.arb_type]) for d in self._detectors
+        ]
+        # Accumulated detection groups per queued (base, quote) symbol. The event queue
+        # coalesces by (base, quote), so without this a CEX tick that queues a symbol would
+        # hide a DEX tick arriving before the symbol is processed (dropping DEX detection).
+        # Groups are unioned here and drained at dequeue, so every group seen while a symbol
+        # was queued is honoured in the one processing pass.
+        self._pending_groups: dict[tuple[str, str], set[str]] = {}
         # Per-detector diagnostics (§17). Reads the counters the detectors own; the
         # engine only attributes post-detection outcomes (candidates, assembler
         # rejections, publishes) back to the candidate's arb type.
@@ -119,6 +161,9 @@ class ScanningEngine:
         self._reconciliation = ReconciliationScheduler(
             config, self._run_full_scan, self._sweep_and_count, self._health_pass
         )
+        # Phase 4 — per-detector reconciliation cadence + yield-aware backoff. Governs only
+        # the safety-net re-scan; the event path stays authoritative.
+        self._cadence = DetectorReconciliationCadence(config, time.monotonic())
 
         self._worker_task: asyncio.Task | None = None
         self._healthcheck_task: asyncio.Task | None = None
@@ -127,6 +172,7 @@ class ScanningEngine:
         self._stop = asyncio.Event()
 
         self._cache.subscribe(self._on_cache_write)
+        self._cache.subscribe_funding(self._on_funding_write)
         self._health.on_transition(self._on_status_transition)
 
     # ── public accessors (Admin Signal Monitoring §16.6) ──
@@ -167,14 +213,33 @@ class ScanningEngine:
         self._ctx = None
         for comp in (self._cache, self._cooldown, self._lifecycle, self._assembler,
                      self._priority, self._market_collector, self._dex_collector,
-                     self._reconciliation, self._health):
+                     self._reconciliation, self._health, self._cadence):
             comp.update_config(config)
 
     # ── event-driven primary path (§1.4) ──
     def _on_cache_write(self, base: str, quote: str, venue: str) -> None:
         self._metrics.record_snapshot()
+        info = self._venue_info.get(venue)
+        group = _GROUP_DEX if info and info.venue_type == VenueType.DEX else _GROUP_CEX
+        self._accumulate_group(base, quote, group)
         priority = self._priority.priority(base)
         self._event_queue.put(priority, (base, quote, venue))
+
+    def _on_funding_write(self, base: str, venue: str) -> None:
+        # Funding data changed for `base` — schedule a funding-only detection pass on the
+        # canonical (base, USDT) key (§7.4). Coalesces/merges with any market-data event
+        # already queued for the same symbol.
+        self._accumulate_group(base, _FUNDING_QUOTE, _GROUP_FUNDING)
+        priority = self._priority.priority(base)
+        self._event_queue.put(priority, (base, _FUNDING_QUOTE, venue))
+
+    def _accumulate_group(self, base: str, quote: str, group: str) -> None:
+        key = (base, quote)
+        groups = self._pending_groups.get(key)
+        if groups is None:
+            self._pending_groups[key] = {group}
+        else:
+            groups.add(group)
 
     async def _generator_worker(self) -> None:
         last_yield = time.monotonic()
@@ -187,7 +252,21 @@ class ScanningEngine:
                 # wait_for suspended for the full timeout — the loop just ran freely.
                 last_yield = time.monotonic()
                 continue
-            await self._process_symbol(base, quote)
+            # Drain the groups accumulated for this symbol while it sat in the queue. Missing
+            # key (never expected) falls back to all detectors, so routing can only ever skip
+            # provably-irrelevant work, never a real opportunity.
+            try:
+                groups = self._pending_groups.pop((base, quote), _ALL_GROUPS)
+                await self._process_symbol(base, quote, groups)
+            except Exception as exc:  # noqa: BLE001 — the worker is the authoritative path;
+                # a single failing candidate/adapter/lifecycle must never terminate it (the
+                # reconciliation safety net is guarded the same way). CancelledError is a
+                # BaseException, so shutdown still propagates.
+                emit, suppressed = _generator_log_throttle.allow(
+                    (base, quote, type(exc).__name__))
+                if emit:
+                    log.warning("generator_error", coin=base, quote=quote,
+                                error=describe_exc(exc), repeats_suppressed=suppressed)
             # get() returns via get_nowait() while events keep arriving, so nothing on
             # this path is guaranteed to suspend — yield on budget (see _YIELD_BUDGET_SEC).
             now = time.monotonic()
@@ -195,7 +274,10 @@ class ScanningEngine:
                 await asyncio.sleep(0)
                 last_yield = time.monotonic()
 
-    async def _process_symbol(self, base: str, quote: str) -> None:
+    async def _process_symbol(self, base: str, quote: str,
+                              groups: frozenset[str] | set[str] = _ALL_GROUPS,
+                              from_reconciliation: bool = False,
+                              only_detectors: Collection[str] | None = None) -> None:
         started = time.perf_counter()
         self._metrics.record_opportunity_checked()
         ctx = self._detection_context()
@@ -207,7 +289,15 @@ class ScanningEngine:
         if len(online_venues) >= 2:
             self._metrics.record_pair_checked(online_venues)
         candidates: list[Candidate] = []
-        for detector in self._detectors:
+        for detector, triggers in self._detector_trigger:
+            # Reconciliation (Phase 4) passes an explicit due+eligible detector set; the
+            # event path (§1.4) filters by which cache group changed. only_detectors wins.
+            if only_detectors is not None:
+                if detector.arb_type not in only_detectors:
+                    continue
+            elif triggers.isdisjoint(groups):
+                continue
+            det_started = time.perf_counter()
             try:
                 candidates.extend(detector.detect(ctx, base, quote))
             except Exception as exc:  # noqa: BLE001
@@ -217,7 +307,13 @@ class ScanningEngine:
                     log.warning("detector_error", detector=detector.arb_type,
                                 error=describe_exc(exc),
                                 repeats_suppressed=suppressed)
-        self._metrics.record_detection((time.perf_counter() - started) * 1000)
+            finally:
+                # Per-detector CPU attribution (§17). finally so a raising detect() is
+                # still timed; measures only the detect() call, not the shared scan setup.
+                self._metrics.record_detector_time(
+                    detector.arb_type, (time.perf_counter() - det_started) * 1000)
+        self._metrics.record_detection((time.perf_counter() - started) * 1000,
+                                       from_reconciliation)
         # Collapse duplicate opportunities within this tick: several detectors (and
         # repeated cache-write events for the same pair) can emit the same venue-pair
         # opportunity, and assembling each one runs the full profit pipeline. Keep only
@@ -244,7 +340,9 @@ class ScanningEngine:
     async def _handle_candidate(self, cand: Candidate) -> None:
         gen_started = time.perf_counter()
         result = await self._assembler.assemble(cand)
-        self._metrics.record_generation((time.perf_counter() - gen_started) * 1000)
+        # Split assemble time: cheap spot pre-gate exits vs full-pipeline assembles (§17).
+        self._metrics.record_generation((time.perf_counter() - gen_started) * 1000,
+                                        pregate=result.pregate_hit)
         self._metrics.record_pair_candidate(cand.buy_leg.venue, cand.sell_leg.venue)
         if result.reject_reason is not None:
             self._metrics.record_reject(result.reject_reason.value)
@@ -262,6 +360,9 @@ class ScanningEngine:
             self._metrics.record_signal(event, signal.arb_type.value)
             self._detector_stats.record_published(signal.arb_type.value)
             self._metrics.record_pair_signal(cand.buy_leg.venue, cand.sell_leg.venue)
+            # Yield-aware recovery: a publish resets this detector's reconciliation cadence
+            # back to base (Phase 4), so activity restores full coverage immediately.
+            self._cadence.mark_publish(signal.arb_type.value, time.monotonic())
 
     def _detection_context(self) -> DetectionContext:
         # DetectionContext holds only stable references (cache, health, venue map,
@@ -278,26 +379,120 @@ class ScanningEngine:
                 funding_min_annualized_spread=Decimal(
                     str(self._config.funding_min_annualized_spread)),
                 ambiguous_tickers=frozenset(self._config.ambiguous_tickers),
+                # Phase 3 economic floor — same taker rates / thresholds the assembler uses.
+                cex_taker_rates=self._cex_taker_rates(),
+                economic_floor_enabled=self._config.detector_economic_floor_enabled,
+                min_roi_pct=Decimal(str(self._config.min_roi_pct)),
+                stablecoin_crossquote_bps=Decimal(str(self._config.stablecoin_crossquote_bps)),
+                cost_amortization_usd=Decimal(str(self._config.detector_cost_amortization_usd)),
+                gas_estimate_usd=Decimal(str(self._config.detector_gas_estimate_usd)),
+                min_net_profit_usd=Decimal(str(self._config.min_net_profit_usd)),
+                funding_position_size_usd=Decimal(str(self._config.funding_position_size_usd)),
+                funding_hold_hours=Decimal(str(self._config.funding_hold_hours)),
+                # Live view of active-signal routes — exempt from the economic prune so
+                # §12.4 spread-collapse expiry is preserved (see is_active_route).
+                active_routes=self._lifecycle.active_route_keys(),
             )
             self._ctx = ctx
         return ctx
 
+    def _cex_taker_rates(self) -> dict[str, Decimal]:
+        """Per-CEX-venue taker-fee rate (fraction) from the adapters — the single source
+        the assembler also uses, so the detector floor and the assembler agree on cost."""
+        from src.domain.market import CanonicalSymbol
+        rates: dict[str, Decimal] = {}
+        for vid, adapter in self._adapters.items():
+            if adapter.venue_type == VenueType.CEX:
+                rates[vid] = adapter.taker_fee(CanonicalSymbol("_", "_", VenueType.CEX))
+        return rates
+
     # ── reconciliation safety net (§1.5) ──
     async def _run_full_scan(self) -> None:
-        last_yield = time.monotonic()
-        for pair in self._cache.tracked_pairs():
-            base, _, quote = pair.partition("/")
-            if base and quote:
-                await self._process_symbol(base, quote)
-                # Same no-suspension-point hazard as _generator_worker: a full-cache
-                # scan is one long sync block without this budget yield.
-                now = time.monotonic()
-                if now - last_yield >= _YIELD_BUDGET_SEC:
+        """Smart reconciliation pass (Phase 4). Still a safety net — it verifies the event
+        path — but scans only the *working set* (pairs that can currently form a candidate)
+        and, per pair, only the detectors that are both cadence-*due* and *eligible*. The
+        old behavior (all detectors × all tracked pairs every pass) is recovered by setting
+        every cadence to 0 and is what a first pass / post-publish detector falls back to."""
+        pass_started = time.perf_counter()
+        now = time.monotonic()
+        due = self._cadence.due_detectors(now)
+        n_detectors = len(self._detectors)
+        working_set = skipped_pairs = ran = skipped = 0
+        if due:
+            last_yield = time.monotonic()
+            for pair in self._cache.tracked_pairs():
+                base, _, quote = pair.partition("/")
+                if not (base and quote):
+                    continue
+                # (due ∩ eligible): a strict subset of what the old scan ran. Eligibility is
+                # a safe SUPERSET of "can produce a candidate" (over-inclusion only wastes a
+                # detect() that early-returns; it never hides an opportunity).
+                run_set = due & self._reconcile_eligibility(base, quote)
+                if not run_set:
+                    skipped_pairs += 1
+                    skipped += n_detectors      # old scan would have run all detectors here
+                    continue
+                working_set += 1
+                ran += len(run_set)
+                skipped += n_detectors - len(run_set)
+                await self._process_symbol(base, quote, from_reconciliation=True,
+                                           only_detectors=run_set)
+                t = time.monotonic()
+                if t - last_yield >= _YIELD_BUDGET_SEC:
                     await asyncio.sleep(0)
-                    last_yield = time.monotonic()
+                    last_yield = t
+            self._cadence.mark_reconciled(due, now)
         self._metrics.cache_size = self._cache.size()
         self._metrics.outliers = self._cache.outliers
         self._metrics.rejected_prices = self._cache.rejected_prices
+        self._metrics.record_reconciliation_scan(
+            working_set, skipped_pairs, ran, skipped, self._cadence.cadence_report(now))
+        # Whole-pass wall-clock duration — confirms the reconciliation cadence/saturation.
+        self._metrics.record_reconciliation_pass((time.perf_counter() - pass_started) * 1000)
+
+    def _reconcile_eligibility(self, base: str, quote: str) -> set[str]:
+        """arb types that could form a candidate for this pair right now, from online-venue
+        coverage. A safe SUPERSET of true eligibility (detectors still apply freshness/lead-
+        time), so a pair/detector is never wrongly skipped — the coverage-preserving core of
+        the working-set optimization."""
+        pair = f"{base}/{quote}"
+        cex = dex = 0
+        dex_networks: set[str] = set()
+        for v in self._cache.venues_for_pair(pair):
+            if not self._health.is_online(v):
+                continue
+            info = self._venue_info.get(v)
+            if info is None:
+                continue
+            if info.venue_type == VenueType.CEX:
+                cex += 1
+            elif info.venue_type == VenueType.DEX:
+                dex += 1
+                if info.network:
+                    dex_networks.add(info.network)
+        out: set[str] = set()
+        if cex >= 2:
+            out.add(ArbitrageType.CEX_CEX.value)
+        if cex >= 1 and dex >= 1:
+            out.add(ArbitrageType.CEX_DEX.value)
+        if dex >= 2:
+            out.add(ArbitrageType.DEX_DEX.value)
+        if len(dex_networks) >= 2:
+            out.add(ArbitrageType.CROSS_CHAIN.value)
+        if self._funding_eligible(base):
+            out.add(ArbitrageType.FUNDING.value)
+        return out
+
+    def _funding_eligible(self, base: str) -> bool:
+        """True when >= 2 online venues carry funding data for this asset (the funding
+        detector's necessary precondition; it further checks lead time/rates)."""
+        count = 0
+        for fr in self._cache.all_funding_for(base):
+            if self._health.is_online(fr.venue):
+                count += 1
+                if count >= 2:
+                    return True
+        return False
 
     async def _sweep_and_count(self) -> int:
         count = await self._lifecycle.sweep_expired()
@@ -488,6 +683,7 @@ class ScanningEngine:
                     signals_published=m.signals_created,
                     telegram_sent=m.notifications_sent,
                     reject_reasons=dict(m.rejections),
+                    timing=m.timing_snapshot(),
                 )
                 # Event-queue composition (§1.6): confirms the coalesced `queue_pending`
                 # is bounded and no priority tier is starving (rising oldest_age on tier 3).

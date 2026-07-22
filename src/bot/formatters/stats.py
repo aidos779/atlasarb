@@ -21,20 +21,31 @@ def format_detector_stats(report: dict[str, dict[str, int]]) -> str:
     lines = ["<b>Engine Statistics (last minute)</b>"]
     for key, label in _DETECTOR_LABELS:
         counters = report.get(key, {})
-        rejected = (counters.get("rejected_fees", 0)
-                    + counters.get("rejected_spread", 0)
-                    + counters.get("rejected_liquidity", 0)
-                    + counters.get("rejected_validation", 0))
+        dropped = (counters.get("rejected_fees", 0)
+                   + counters.get("rejected_spread", 0)
+                   + counters.get("rejected_liquidity", 0)
+                   + counters.get("rejected_validation", 0))
+        asm_rejected = (counters.get("asm_rejected_fees", 0)
+                        + counters.get("asm_rejected_spread", 0)
+                        + counters.get("asm_rejected_liquidity", 0)
+                        + counters.get("asm_rejected_validation", 0))
         lines += [
             "",
             f"<b>{label}</b>",
             f"Checked: {counters.get('checked', 0)}",
             f"Candidates: {counters.get('candidates', 0)}",
             f"Published: {counters.get('published', 0)}",
-            f"Rejected: {rejected}",
+            # Detector-side drops (before a candidate is created).
+            f"Detector-dropped: {dropped}",
             f"- fees {counters.get('rejected_fees', 0)}",
             f"- spread {counters.get('rejected_spread', 0)}",
             f"- liquidity {counters.get('rejected_liquidity', 0)}",
             f"- validation {counters.get('rejected_validation', 0)}",
+            # Assembler-side rejects (emitted candidate dropped downstream).
+            f"Assembler-rejected: {asm_rejected}",
+            f"- fees {counters.get('asm_rejected_fees', 0)}",
+            f"- spread {counters.get('asm_rejected_spread', 0)}",
+            f"- liquidity {counters.get('asm_rejected_liquidity', 0)}",
+            f"- validation {counters.get('asm_rejected_validation', 0)}",
         ]
     return "\n".join(lines)

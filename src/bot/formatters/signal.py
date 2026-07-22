@@ -10,6 +10,7 @@ exchange names, tickers, network names, and the signal id.
 from __future__ import annotations
 
 import html
+import time
 
 from src.bot.formatters.money import format_datetime, format_money, format_pct
 from src.domain.entitlements import entitlements_for
@@ -21,6 +22,27 @@ from src.i18n import arb_type_label, risk_explanation, risk_label, status_label,
 _CONF_THRESHOLD = 70
 
 
+def _hold_horizon(hours: float | None, lang: str) -> str | None:
+    """Localized holding horizon: days when a whole-day multiple, else hours. None if
+    unset (older/hand-built signals) so callers can omit the line."""
+    if not hours:
+        return None
+    if hours % 24 == 0:
+        return t("unit.days", lang, n=int(hours // 24))
+    return t("unit.hours", lang, n=int(hours))
+
+
+def _funding_next_line(signal: Signal, lang: str, tz) -> str | None:
+    """Next-funding line, guarding a settlement time already in the past (renders
+    'imminent' instead of a stale timestamp). None when unset → line omitted."""
+    if not signal.funding_next_time:
+        return None
+    label = t("details.funding_next", lang)
+    if signal.funding_next_time > time.time():
+        return f"{label}: {format_datetime(signal.funding_next_time, tz)}"
+    return f"{label}: {t('details.funding_next_now', lang)}"
+
+
 async def format_card(signal: Signal, profile: UserProfile, fx,
                       confidence_threshold: float = _CONF_THRESHOLD) -> str:
     lang = profile.settings.language.value
@@ -29,10 +51,19 @@ async def format_card(signal: Signal, profile: UserProfile, fx,
     pair = html.escape(signal.trading_pair)
     network = signal.network or t("profile.unknown", lang)
     liq = await format_money(fx, signal.liquidity_usd, cur)
+    # Funding is a hedged carry, never a spot buy→sell — show long/short + annualized
+    # differential (spread_pct, percent), not "Buy: X → Sell: Y".
+    if signal.arb_type == ArbitrageType.FUNDING:
+        route_line = t("card.funding_route", lang,
+                       long=html.escape(signal.buy_exchange),
+                       short=html.escape(signal.sell_exchange),
+                       annualized=format_pct(signal.spread_pct))
+    else:
+        route_line = t("card.route", lang, buy=html.escape(signal.buy_exchange),
+                       sell=html.escape(signal.sell_exchange))
     lines = [
         f"{signal.ranking.emoji} <b>{pair}</b>  {format_pct(signal.net_profit_pct)} (~{net_usd})",
-        t("card.route", lang, buy=html.escape(signal.buy_exchange),
-          sell=html.escape(signal.sell_exchange)),
+        route_line,
         t("card.meta", lang, liquidity=liq, network=network,
           risk_emoji=signal.risk_score.emoji, risk=risk_label(signal.risk_score, lang)),
         t("card.active", lang, seconds=signal.age_sec()),
@@ -57,18 +88,42 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
         parts.append(t("details.expired", lang, ts=ts))
 
     # ── Overview (§10.1) ──
-    buy_price = await format_money(fx, signal.buy_price, cur)
-    sell_price = await format_money(fx, signal.sell_price, cur)
     buy_venue = html.escape(signal.buy_exchange)
     sell_venue = html.escape(signal.sell_exchange)
+    # Funding is a delta-neutral perp carry: its legs carry no spot price (the detector
+    # sets a $1 placeholder), so rendering them as "Buy @ $1.00 / Sell @ $1.00" is wrong.
+    # Show the hedge (long the low-funding venue, short the high-funding venue) instead.
+    if signal.arb_type == ArbitrageType.FUNDING:
+        legs_lines = [
+            t("details.funding_long", lang, exchange=buy_venue),
+            t("details.funding_short", lang, exchange=sell_venue),
+        ]
+        if (signal.funding_buy_annualized is not None
+                and signal.funding_sell_annualized is not None):
+            legs_lines.append(t(
+                "details.funding_leg_rate", lang,
+                buy_rate=format_pct(signal.funding_buy_annualized),
+                sell_rate=format_pct(signal.funding_sell_annualized)))
+        next_line = _funding_next_line(signal, lang, tz)
+        if next_line:
+            legs_lines.append(next_line)
+        horizon = _hold_horizon(signal.funding_hold_hours, lang)
+        if horizon:
+            legs_lines.append(f"{t('details.funding_hold', lang)}: {horizon}")
+        legs_block = "\n".join(legs_lines)
+    else:
+        buy_price = await format_money(fx, signal.buy_price, cur)
+        sell_price = await format_money(fx, signal.sell_price, cur)
+        legs_block = (
+            f"{t('details.buy_on', lang, exchange=buy_venue, price=buy_price)}\n"
+            f"{t('details.sell_on', lang, exchange=sell_venue, price=sell_price)}")
     parts.append(
         f"<b>{pair}</b> — {arb_type_label(signal.arb_type, lang)} {signal.ranking.emoji}\n"
         f"{t('details.signal_id', lang)}: <code>{signal.id[:8]}</code> · "
         f"{t('details.status', lang)}: {status_emoji} {status_label(signal.status, lang)}\n"
         f"{t('details.detected', lang)}: {format_datetime(signal.timestamp, tz)} · "
         f"{t('card.active', lang, seconds=signal.age_sec())}\n\n"
-        f"{t('details.buy_on', lang, exchange=buy_venue, price=buy_price)}\n"
-        f"{t('details.sell_on', lang, exchange=sell_venue, price=sell_price)}\n\n"
+        f"{legs_block}\n\n"
         f"{_spread_line(signal, lang)} · "
         f"{t('details.confidence', lang)}: {signal.confidence_score}%"
     )
@@ -83,7 +138,7 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
         spread_label = t(
             "details.funding_annualized" if signal.arb_type == ArbitrageType.FUNDING
             else "details.gross_spread", lang)
-        parts.append(
+        breakdown_text = (
             f"<b>{t('details.breakdown_title', lang)}</b>\n"
             f"{spread_label}: {format_pct(bd.gross_spread_pct)}\n"
             f"{t('details.trading_fees', lang)}: "
@@ -95,6 +150,13 @@ async def format_details(signal: Signal, profile: UserProfile, fx,
             f"<b>{t('details.net_profit', lang)}: "
             f"{format_pct(bd.net_profit_pct)} (~{net_usd})</b>"
         )
+        # Funding net is a carry realized over the holding horizon, not a per-trade spot
+        # profit — say so explicitly so the figure is never read as an instant return.
+        if signal.arb_type == ArbitrageType.FUNDING:
+            horizon = _hold_horizon(signal.funding_hold_hours, lang)
+            if horizon:
+                breakdown_text += f"\n{t('details.funding_horizon', lang, days=horizon)}"
+        parts.append(breakdown_text)
 
     # ── Fees (§10.3) ──
     parts.append(
@@ -158,6 +220,22 @@ def _historical(reliability: float | None, lang: str) -> str:
 
 def _trade_route(signal: Signal, lang: str) -> str:
     title = f"<b>{t('route.title', lang)}</b>"
+    # Funding: a hedged long/short carry — never a buy→move→sell spot route. buy_exchange
+    # is the long (low-funding) leg, sell_exchange the short (high-funding) leg (§7.4).
+    if signal.arb_type == ArbitrageType.FUNDING:
+        horizon = _hold_horizon(signal.funding_hold_hours, lang)
+        hold_step = (t("route.funding_hold", lang, days=horizon) if horizon
+                     else t("route.funding_hold_nohorizon", lang))
+        steps = [
+            t("route.funding_open_long", lang, coin=signal.coin,
+              exchange=signal.buy_exchange),
+            t("route.funding_open_short", lang, coin=signal.coin,
+              exchange=signal.sell_exchange),
+            hold_step,
+            t("route.funding_close", lang),
+            t("route.funding_note", lang),
+        ]
+        return title + "\n" + "\n".join(steps)
     if signal.arb_type == ArbitrageType.CEX_CEX:
         return f"{title}\n{t('route.no_transfer', lang)}"
     steps = [t("route.buy", lang, coin=signal.coin, exchange=signal.buy_exchange)]
@@ -179,6 +257,19 @@ async def format_alert(signal: Signal, profile: UserProfile, fx) -> str:
     liq = await format_money(fx, signal.liquidity_usd, cur)
     risk_dots = {"Low": "●○○○○", "Medium": "●●●○○", "High": "●●●●●"}[signal.risk_score.value]
     pair = html.escape(signal.trading_pair)
+    # Funding gets its own alert: long/short hedge + annualized differential, never a
+    # "Buy X → Sell Y" spot instruction (which reads as a spot trade for a carry position).
+    if signal.arb_type == ArbitrageType.FUNDING:
+        # spread_pct is the annualized differential in PERCENT. funding_annualized_spread
+        # is a fraction and must NOT go to format_pct (that under-scaled it 100x).
+        annualized = format_pct(signal.spread_pct)
+        return "\n".join([
+            t("alert.funding_new", lang, pair=pair,
+              profit=format_pct(signal.net_profit_pct)),
+            t("alert.funding_route", lang, long=html.escape(signal.buy_exchange),
+              short=html.escape(signal.sell_exchange), annualized=annualized),
+            t("alert.meta", lang, liquidity=liq, risk=risk_dots),
+        ])
     return "\n".join([
         t("alert.new", lang, pair=pair, profit=format_pct(signal.net_profit_pct)),
         t("alert.route", lang, buy=html.escape(signal.buy_exchange),

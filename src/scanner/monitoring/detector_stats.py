@@ -31,12 +31,14 @@ REPORT_KEYS: tuple[str, ...] = tuple(a.value.lower() for a in ArbitrageType)
 # The engine-wide reject buckets collapse into the four the per-detector report exposes.
 # Freshness and risk rejections are both "the candidate failed validation", which is the
 # actionable distinction here — the fine-grained reasons stay in ``engine_stats``.
+# Assembler-side rejection reasons attribute to the asm_rejected_* fields (a candidate the
+# detector emitted, dropped downstream). Detector-side drops write rejected_by_* directly.
 _BUCKET_FIELD = {
-    "spread": "rejected_by_spread",
-    "fees": "rejected_by_fees",
-    "liquidity": "rejected_by_liquidity",
-    "freshness": "rejected_by_validation",
-    "risk": "rejected_by_validation",
+    "spread": "asm_rejected_spread",
+    "fees": "asm_rejected_fees",
+    "liquidity": "asm_rejected_liquidity",
+    "freshness": "asm_rejected_validation",
+    "risk": "asm_rejected_validation",
 }
 
 
@@ -47,14 +49,34 @@ class DetectorCounters:
     ``opportunities_checked`` counts ``detect()`` invocations — i.e. how many (base,quote)
     opportunities this detector examined, including the ones it dropped for want of
     input data. That is deliberately the "is it running at all" signal.
+
+    Rejections are split into two independent stages that used to share one set of fields
+    (which is why prod ``rejected_spread`` read as 2x candidates for cross_chain):
+      * ``rejected_by_*``     — DETECTOR-side drops: opportunities the detector discarded
+                                *before* emitting a candidate (``self.counters`` writes);
+      * ``asm_rejected_*``    — ASSEMBLER-side rejects: emitted candidates the downstream
+                                pipeline dropped (attributed via ``record_rejection``).
+    A candidate is now counted at exactly one stage, so the two columns are additive and
+    the funnel (checked → candidates → asm_rejected → published) is internally consistent.
     """
 
     opportunities_checked: int = 0
     candidates_created: int = 0
+    # detector-side drops (pre-candidate)
     rejected_by_spread: int = 0
     rejected_by_fees: int = 0
     rejected_by_liquidity: int = 0
     rejected_by_validation: int = 0
+    # detector-side economic floor (Phase 3): opportunities dropped before Candidate
+    # creation. rejected_economic = failed the taker/gas + min-ROI floor (all detectors);
+    # rejected_bridge = cross-chain dropped for no route or an un-clearable bridge fee.
+    rejected_economic: int = 0
+    rejected_bridge: int = 0
+    # assembler-side rejects (post-candidate)
+    asm_rejected_spread: int = 0
+    asm_rejected_fees: int = 0
+    asm_rejected_liquidity: int = 0
+    asm_rejected_validation: int = 0
     signals_published: int = 0
 
     def snapshot(self) -> dict[str, int]:
@@ -66,6 +88,12 @@ class DetectorCounters:
             "rejected_fees": self.rejected_by_fees,
             "rejected_liquidity": self.rejected_by_liquidity,
             "rejected_validation": self.rejected_by_validation,
+            "rejected_economic": self.rejected_economic,
+            "rejected_bridge": self.rejected_bridge,
+            "asm_rejected_spread": self.asm_rejected_spread,
+            "asm_rejected_fees": self.asm_rejected_fees,
+            "asm_rejected_liquidity": self.asm_rejected_liquidity,
+            "asm_rejected_validation": self.asm_rejected_validation,
         }
 
     def reset(self) -> None:
@@ -75,6 +103,12 @@ class DetectorCounters:
         self.rejected_by_fees = 0
         self.rejected_by_liquidity = 0
         self.rejected_by_validation = 0
+        self.rejected_economic = 0
+        self.rejected_bridge = 0
+        self.asm_rejected_spread = 0
+        self.asm_rejected_fees = 0
+        self.asm_rejected_liquidity = 0
+        self.asm_rejected_validation = 0
         self.signals_published = 0
 
 
@@ -113,7 +147,7 @@ class DetectorStats:
         counters = self._by_type.get(arb_type)
         if counters is None:
             return
-        field = _BUCKET_FIELD.get(Metrics.reject_bucket(reason), "rejected_by_validation")
+        field = _BUCKET_FIELD.get(Metrics.reject_bucket(reason), "asm_rejected_validation")
         setattr(counters, field, getattr(counters, field) + 1)
 
     def record_published(self, arb_type: str) -> None:

@@ -100,8 +100,14 @@ class Candidate:
     bridge_name: str | None = None          # §7.5
     bridge_fee_usd: Decimal | None = None
     bridge_time_sec: int | None = None
-    funding_annualized_spread: Decimal | None = None  # §7.4
+    funding_annualized_spread: Decimal | None = None  # §7.4 (fraction, legacy — see below)
     funding_next_time: float | None = None
+    # Per-leg annualized funding rates in PERCENT units (long/buy leg = lower funding,
+    # short/sell leg = higher funding). Presentation-only: the detector already computes
+    # low/high.annualized() (fractions); these retain them ×100 so the formatter never
+    # re-derives funding economics. Percent to match Signal.spread_pct / net_profit_pct.
+    funding_buy_annualized: Decimal | None = None
+    funding_sell_annualized: Decimal | None = None
     # Funding-leg data snapshots (§7.4 → §11.5 confidence). low = long/buy leg (lower
     # funding), high = short/sell leg (higher funding). Captured at detection time.
     funding_low: FundingSnapshot | None = None
@@ -184,8 +190,14 @@ class Signal:
     bridge_time_sec: int | None = None
     spread_decay_risk: str | None = None
     atomic_execution: bool = False
-    funding_annualized_spread: Decimal | None = None
+    funding_annualized_spread: Decimal | None = None  # fraction (legacy — not for display)
     funding_next_time: float | None = None
+    # Per-leg annualized funding rates in PERCENT units + holding horizon (hours). All
+    # presentation-only; populated for FUNDING signals by the assembler. Percent so they
+    # can go straight to format_pct alongside spread_pct/net_profit_pct.
+    funding_buy_annualized: Decimal | None = None
+    funding_sell_annualized: Decimal | None = None
+    funding_hold_hours: float | None = None
 
     # provenance for confidence/history (§11.5, §12.5)
     warmed_up: bool = True

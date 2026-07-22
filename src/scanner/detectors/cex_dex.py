@@ -46,7 +46,17 @@ class CexDexDetector(Detector):
                 # Direction B: buy DEX (spot), sell CEX (bid)
                 gross_b = self._gross_spread_pct(dex_spot, cex_quote.bid)
 
+                # Fixed gas cost (one DEX swap) folded into the economic floor as a
+                # lower-bound %-term; the round-trip CEX taker is the dominant component.
+                gas = ctx.gas_estimate_usd
                 if gross_a >= gross_b and gross_a > 0:
+                    if (not ctx.clears_economic_floor(gross_a, cex_venue, "CEX",
+                                                      dex_venue, "DEX", quote_asset, gas)
+                            and not ctx.is_active_route(
+                                ArbitrageType.CEX_DEX.value, base_asset, quote_asset,
+                                cex_venue, dex_venue, network)):
+                        self.counters.rejected_economic += 1
+                        continue
                     candidates.append(Candidate(
                         arb_type=ArbitrageType.CEX_DEX, base_asset=base_asset,
                         quote_asset=quote_asset, network=network,
@@ -59,6 +69,13 @@ class CexDexDetector(Detector):
                     # Neither direction shows a positive gross spread on this venue pair.
                     self.counters.rejected_by_spread += 1
                 else:
+                    if (not ctx.clears_economic_floor(gross_b, dex_venue, "DEX",
+                                                      cex_venue, "CEX", quote_asset, gas)
+                            and not ctx.is_active_route(
+                                ArbitrageType.CEX_DEX.value, base_asset, quote_asset,
+                                dex_venue, cex_venue, network)):
+                        self.counters.rejected_economic += 1
+                        continue
                     candidates.append(Candidate(
                         arb_type=ArbitrageType.CEX_DEX, base_asset=base_asset,
                         quote_asset=quote_asset, network=network,

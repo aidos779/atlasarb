@@ -60,6 +60,18 @@ class DexDexDetector(Detector):
                     self.counters.rejected_by_spread += 1
                     continue
 
+                # Detector-side economic floor (§ Phase 3): both legs are DEX (no flat
+                # taker), so the floor is min ROI plus a lower-bound gas term. Same-chain
+                # DEX pairs are MEV-arbitraged to sub-min-ROI spreads, so this removes the
+                # bulk of the never-publishable candidates before the assembler.
+                if (not ctx.clears_economic_floor(gross, buy_v, "DEX", sell_v, "DEX",
+                                                  quote_asset, ctx.gas_estimate_usd)
+                        and not ctx.is_active_route(
+                            ArbitrageType.DEX_DEX.value, base_asset, quote_asset,
+                            buy_v, sell_v, buy_n)):
+                    self.counters.rejected_economic += 1
+                    continue
+
                 # Cross-network DEX-DEX → cross-chain type (§7.3 business rule).
                 arb_type = ArbitrageType.DEX_DEX if same_chain else ArbitrageType.CROSS_CHAIN
                 candidates.append(Candidate(

@@ -67,11 +67,16 @@ _DEFAULT_HISTORICAL_RELIABILITY = Decimal(60)
 
 
 class AssemblyResult:
-    __slots__ = ("signal", "reject_reason")
+    # pregate_hit is instrumentation only (§17 CPU attribution): True when the spot
+    # cheap fee-floor pre-gate decided the result, so the engine can time pre-gate exits
+    # separately from full-pipeline assembles. It never affects signal/reject semantics.
+    __slots__ = ("signal", "reject_reason", "pregate_hit")
 
-    def __init__(self, signal: Signal | None, reject_reason: RejectReason | None) -> None:
+    def __init__(self, signal: Signal | None, reject_reason: RejectReason | None,
+                 pregate_hit: bool = False) -> None:
         self.signal = signal
         self.reject_reason = reject_reason
+        self.pregate_hit = pregate_hit
 
 
 class SignalAssembler:
@@ -170,9 +175,11 @@ class SignalAssembler:
         if floor is not None:
             gross = cand.gross_spread_pct
             if gross <= floor:
-                return AssemblyResult(None, RejectReason.UNPROFITABLE_AFTER_FEES)
+                return AssemblyResult(None, RejectReason.UNPROFITABLE_AFTER_FEES,
+                                      pregate_hit=True)
             if gross - floor < Decimal(str(self._config.min_roi_pct)):
-                return AssemblyResult(None, RejectReason.BELOW_MIN_PROFIT)
+                return AssemblyResult(None, RejectReason.BELOW_MIN_PROFIT,
+                                      pregate_hit=True)
 
         # One pair string for the whole assembly. It was being rebuilt ~7x per candidate
         # (both book lookups, the warm-up check, the risk inputs, the confidence inputs
@@ -339,6 +346,11 @@ class SignalAssembler:
                                     tier, score, True)
         signal.funding_annualized_spread = annualized
         signal.funding_next_time = cand.funding_next_time
+        # Presentation-only fields (§ funding formatter): per-leg annualized rates (percent,
+        # from the detector) and the holding horizon (config). No effect on profit/ROI.
+        signal.funding_buy_annualized = cand.funding_buy_annualized
+        signal.funding_sell_annualized = cand.funding_sell_annualized
+        signal.funding_hold_hours = self._config.funding_hold_hours
         return AssemblyResult(signal, None)
 
     def _funding_confidence(self, cand: Candidate) -> int:
@@ -462,7 +474,12 @@ class SignalAssembler:
             return Decimal(0)
         total = Decimal(0)
         for network in networks:
-            g = await self._gas.gas_price_usd(network, _GAS_UNITS_PER_SWAP)
+            try:
+                g = await self._gas.gas_price_usd(network, _GAS_UNITS_PER_SWAP)
+            except Exception as exc:  # noqa: BLE001 — a failing gas provider is "gas
+                # unavailable", identical to a None return; it must never reach the engine.
+                log.debug("gas_estimate_failed", network=network, error=str(exc))
+                return None
             if g is None:
                 return None  # unresolved -> validator rejects
             total += g

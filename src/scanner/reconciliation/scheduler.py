@@ -1,9 +1,11 @@
 """Reconciliation Scheduler (Scanner §1.5 / §16) — the safety net, NOT primary detection.
 
-Fires at most every 1s: re-runs all detectors across the full pair×venue matrix to catch
-anything the event path missed (dropped WS message, REST-only data, silent gap), sweeps
-age-based expiries (§12.4), and runs passive staleness health checks (§2.2). Always scans
-all three priority tiers (§1.6).
+Fires at most every 1s to sweep age-based expiries (§12.4) and run passive staleness health
+checks (§2.2), and to trigger the smart detection re-scan (engine._run_full_scan): the
+working set of pairs that can currently form a candidate × the detectors that are both
+eligible and cadence-due (per-detector interval, yield-aware). This catches anything the
+event path missed (dropped WS message, REST-only data, silent gap) within a bounded
+per-detector latency, without re-running every detector on every pair each pass.
 """
 from __future__ import annotations
 

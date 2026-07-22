@@ -5,6 +5,7 @@ from src.config.logging import (
     describe_exc,
     get_logger,
     install_global_exception_hooks,
+    redact_url,
 )
 from src.config.scanner_config import (
     ArbType,
@@ -28,5 +29,6 @@ __all__ = [
     "get_logger",
     "get_settings",
     "install_global_exception_hooks",
+    "redact_url",
     "validate_config",
 ]

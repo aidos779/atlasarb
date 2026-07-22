@@ -24,6 +24,34 @@ class Metrics:
     signals_by_type: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     detection_durations_ms: deque[float] = field(default_factory=lambda: deque(maxlen=500))
     gen_durations_ms: deque[float] = field(default_factory=lambda: deque(maxlen=500))
+    # ── Phase 1.5 cumulative timing (§17 CPU attribution) ──────────────────────────────
+    # Plain float/int accumulators + in-place defaultdict updates: every hot-path record_*
+    # below is allocation-free. Dict materialization happens only in timing_snapshot(),
+    # called once per engine_stats emission (not in the detection loop).
+    # Detection loop time split by call path (event worker vs 1s reconciliation full scan).
+    event_detection_ms_total: float = 0.0
+    reconciliation_detection_ms_total: float = 0.0
+    event_detection_ticks: int = 0
+    reconciliation_detection_ticks: int = 0
+    # Per-detector cumulative detect() time + call count (attributes detection CPU by type).
+    detector_ms_total: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    detector_calls: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    # Assembler time split: cheap pre-gate exits vs full-pipeline entries (+ overall total).
+    generation_ms_total: float = 0.0
+    assemble_pregate_ms_total: float = 0.0
+    assemble_pregate_count: int = 0
+    assemble_full_ms_total: float = 0.0
+    assemble_full_count: int = 0
+    # Whole-pass duration of the reconciliation full scan.
+    reconciliation_pass_ms_total: float = 0.0
+    reconciliation_pass_count: int = 0
+    # Reconciliation working-set gauges (Phase 4, last pass) — how much the smart scan
+    # skipped vs the old full pair×detector matrix.
+    reconciliation_working_set: int = 0
+    reconciliation_skipped_pairs: int = 0
+    reconciliation_skipped_detector_execs: int = 0
+    reconciliation_ran_detector_execs: int = 0
+    reconciliation_cadence: dict[str, float] = field(default_factory=dict)
     cache_size: int = 0
     outliers: int = 0
     rejected_prices: int = 0
@@ -40,11 +68,43 @@ class Metrics:
     _pair_checked_cache: dict[tuple[str, ...], list[dict[str, int]]] = field(
         default_factory=dict)
 
-    def record_detection(self, duration_ms: float) -> None:
+    def record_detection(self, duration_ms: float, from_reconciliation: bool = False) -> None:
         self.detection_durations_ms.append(duration_ms)
+        if from_reconciliation:
+            self.reconciliation_detection_ms_total += duration_ms
+            self.reconciliation_detection_ticks += 1
+        else:
+            self.event_detection_ms_total += duration_ms
+            self.event_detection_ticks += 1
 
-    def record_generation(self, duration_ms: float) -> None:
+    def record_detector_time(self, arb_type: str, duration_ms: float) -> None:
+        self.detector_ms_total[arb_type] += duration_ms
+        self.detector_calls[arb_type] += 1
+
+    def record_generation(self, duration_ms: float, pregate: bool = False) -> None:
         self.gen_durations_ms.append(duration_ms)
+        self.generation_ms_total += duration_ms
+        if pregate:
+            self.assemble_pregate_ms_total += duration_ms
+            self.assemble_pregate_count += 1
+        else:
+            self.assemble_full_ms_total += duration_ms
+            self.assemble_full_count += 1
+
+    def record_reconciliation_pass(self, duration_ms: float) -> None:
+        self.reconciliation_pass_ms_total += duration_ms
+        self.reconciliation_pass_count += 1
+
+    def record_reconciliation_scan(
+        self, working_set: int, skipped_pairs: int, ran_detectors: int,
+        skipped_detectors: int, cadence: dict[str, float],
+    ) -> None:
+        """Last-pass working-set gauges for the smart reconciliation scan (Phase 4)."""
+        self.reconciliation_working_set = working_set
+        self.reconciliation_skipped_pairs = skipped_pairs
+        self.reconciliation_ran_detector_execs = ran_detectors
+        self.reconciliation_skipped_detector_execs = skipped_detectors
+        self.reconciliation_cadence = cadence
 
     def record_candidate(self) -> None:
         self.candidates_generated += 1
@@ -148,6 +208,32 @@ class Metrics:
     def record_missed_update(self, symbol: str) -> None:
         self.missed_updates[symbol] += 1
 
+    def timing_snapshot(self) -> dict:
+        """Cumulative CPU-attribution timers (§17). Built once per emission — the hot-path
+        record_* methods only touch scalar accumulators, so this materialization never runs
+        in the detection loop."""
+        return {
+            "event_detection_ms_total": round(self.event_detection_ms_total, 1),
+            "reconciliation_detection_ms_total": round(
+                self.reconciliation_detection_ms_total, 1),
+            "event_detection_ticks": self.event_detection_ticks,
+            "reconciliation_detection_ticks": self.reconciliation_detection_ticks,
+            "detector_ms_total": {k: round(v, 1) for k, v in self.detector_ms_total.items()},
+            "detector_calls": dict(self.detector_calls),
+            "generation_ms_total": round(self.generation_ms_total, 1),
+            "assemble_pregate_ms_total": round(self.assemble_pregate_ms_total, 1),
+            "assemble_pregate_count": self.assemble_pregate_count,
+            "assemble_full_ms_total": round(self.assemble_full_ms_total, 1),
+            "assemble_full_count": self.assemble_full_count,
+            "reconciliation_pass_ms_total": round(self.reconciliation_pass_ms_total, 1),
+            "reconciliation_pass_count": self.reconciliation_pass_count,
+            "reconciliation_working_set": self.reconciliation_working_set,
+            "reconciliation_skipped_pairs": self.reconciliation_skipped_pairs,
+            "reconciliation_ran_detector_execs": self.reconciliation_ran_detector_execs,
+            "reconciliation_skipped_detector_execs": self.reconciliation_skipped_detector_execs,
+            "reconciliation_cadence": dict(self.reconciliation_cadence),
+        }
+
     @staticmethod
     def _p95(values: deque[float]) -> float:
         if not values:
@@ -172,4 +258,5 @@ class Metrics:
             "rejected_prices": self.rejected_prices,
             "api_failures": dict(self.api_failures),
             "venue_pairs": self.venue_pair_snapshot(),
+            "timing": self.timing_snapshot(),
         }
